@@ -185,7 +185,11 @@ async def test_production_image_migration_health_and_canonical_flow(
                     lifecycle_id,
                 )
             )
-            if row and row["status"] == "waiting" and row["state_version"] == 2 and pending == 0:
+            # The startup sweep may deterministically reconcile the applied
+            # WAITING state again before this poll observes it. Prove the
+            # command's exact 1 -> 2 mutation below, while accepting a newer
+            # authoritative projection here.
+            if row and row["status"] == "waiting" and row["state_version"] >= 2 and pending == 0:
                 break
             await asyncio.sleep(0.2)
         else:
@@ -212,6 +216,25 @@ async def test_production_image_migration_health_and_canonical_flow(
             raise AssertionError(
                 f"image service did not complete canonical command flow: {diagnostics}"
             )
+
+        command_result = await image_pool.fetchrow(
+            """
+            SELECT verdict, mutated, observed_state_version, resulting_state_version,
+                   reason_code
+            FROM lifecycle_command_results
+            WHERE lifecycle_id = $1 AND command_id = $2
+            """,
+            lifecycle_id,
+            command["command_id"],
+        )
+        assert command_result is not None
+        assert dict(command_result) == {
+            "verdict": "applied",
+            "mutated": True,
+            "observed_state_version": 1,
+            "resulting_state_version": 2,
+            "reason_code": "LEGAL_TRANSITION",
+        }
 
         assert _wait_container_health(service_name) == "healthy"
 
