@@ -34,6 +34,51 @@ run = "'{{config_root}}/.mise/scripts/link-agentfiles.sh'"
 description = "Provision this dev's shared project Hindsight key from 1Password into .env (op inject)"
 run = "'{{config_root}}/.mise/scripts/hindsight-setup.sh'"
 
+[tasks.lint]
+description = "Run Ruff static checks"
+run = "uv run ruff check src tests scripts"
+
+[tasks."format:check"]
+description = "Verify Ruff formatting"
+run = "uv run ruff format --check src tests scripts"
+
+[tasks.typecheck]
+description = "Run static type checks"
+run = "uv run mypy src"
+
+[tasks.test]
+description = "Run deterministic unit and extraction-parity tests"
+run = "uv run pytest -m 'not integration'"
+
+[tasks."test:integration"]
+description = "Run isolated PostgreSQL and NATS integration tests"
+run = "LIFECYCLE_RUN_INTEGRATION=1 uv run pytest -m integration"
+
+[tasks."contracts:verify"]
+description = "Verify pinned Bloodbank commit, schemas, and stream topology"
+run = "uv run python scripts/verify_bloodbank_contracts.py"
+
+[tasks.check]
+description = "Run component validation excluding container integration"
+depends = ["lint", "format:check", "typecheck", "test", "contracts:verify"]
+
+[tasks.migrate]
+description = "Apply Lifecycle-owned PostgreSQL migrations"
+run = "PYTHONPATH=src uv run python -m main migrate"
+
+[tasks.serve]
+description = "Run the Lifecycle authority service"
+run = "PYTHONPATH=src uv run python -m main serve"
+
+[tasks."image:build"]
+description = "Build the production image with immutable source metadata"
+run = """
+docker build \
+  --build-arg SOURCE_REVISION="$(git rev-parse HEAD)" \
+  --build-arg SOURCE_CREATED="$(git log -1 --format=%cI)" \
+  --tag lifecycle:local .
+"""
+
 # >>> mise-versioning >>>  (managed block — do not edit by hand; re-run init to update)
 [tasks."version"]
 description = "Print the current version (vX.Y.Z)"

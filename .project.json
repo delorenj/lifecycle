@@ -2,7 +2,7 @@
   "project_name": "Lifecycle",
   "project_description": "Deterministic lifecycle authority for 33GOD",
   "project_slug": "lifecycle",
-  "repo_path": "/home/delorenj/code/33GOD/worktrees/team-chronos/worktrees/agent-buttercup-lifecycle-bootstrap/lifecycle",
+  "repo_path": "/home/delorenj/code/33GOD/lifecycle",
   "ticket_provider": {
     "type": "plane",
     "workspace": "33god",
