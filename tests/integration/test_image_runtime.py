@@ -235,6 +235,7 @@ async def test_production_image_migration_health_and_canonical_flow(
             for stream, durable in (
                 ("BLOODBANK_COMMANDS", "lifecycle-authority-commands-v1"),
                 ("BLOODBANK_EVENTS", "lifecycle-authority-repo-task-recorded-v1"),
+                ("BLOODBANK_EVENTS", "lifecycle-authority-obligation-evidence-v1"),
             ):
                 try:
                     await cleanup_js.delete_consumer(stream, durable)

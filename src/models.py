@@ -181,6 +181,7 @@ class CapabilityGrant:
     def to_json(self) -> dict[str, Any]:
         return {
             "capability_id": self.capability_id,
+            "capability_version": self.capability_version,
             "actor_id": self.actor_id,
             "actions": list(self.actions),
             "scope": self.scope,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+import json
 from types import SimpleNamespace
 import uuid
 
@@ -14,14 +15,15 @@ from db.migrations import apply_migrations
 from db.repository import ConcurrencyConflict, LifecycleRepository
 from models import CapabilityGrant, CommandVerdict
 from specification import CAPABILITY_ACTION, default_spec
-from tests.factories import command_envelope, repo_task_envelope
+from tests.factories import command_envelope, obligation_evidence_envelope, repo_task_envelope
+from tests.schema_validation import validate_with_bloodbank
 
 
 pytestmark = pytest.mark.integration
 NOW = datetime(2026, 7, 18, 17, 0, tzinfo=timezone.utc)
 
 
-async def _bootstrap(resources, suffix: str):
+async def _bootstrap(resources, suffix: str, *, capability_version: int = 1):
     lifecycle_id = f"lc_{suffix}"
     repo_name = f"delorenj/test-{suffix}"
     actor_id = f"agent:{suffix}"
@@ -29,7 +31,7 @@ async def _bootstrap(resources, suffix: str):
     repository = LifecycleRepository(resources.pool)
     grant = CapabilityGrant(
         capability_id=capability_id,
-        capability_version=1,
+        capability_version=capability_version,
         actor_id=actor_id,
         actions=(CAPABILITY_ACTION,),
         scope=f"lifecycle:{lifecycle_id}",
@@ -179,7 +181,7 @@ async def test_atomic_command_idempotency_and_all_stable_rejections(
 
 
 @pytest.mark.asyncio
-async def test_transaction_rolls_back_state_history_result_and_outbox_together(
+async def test_transaction_aborts_state_history_result_and_outbox_atomically(
     integration_resources,
 ) -> None:
     suffix = uuid.uuid4().hex[:8]
@@ -194,10 +196,10 @@ async def test_transaction_rolls_back_state_history_result_and_outbox_together(
 
     authority = LifecycleAuthority(
         FailingResultRepository(integration_resources.pool),
-        authority_instance="integration-rollback",
+        authority_instance="integration-atomic-abort",
     )
     envelope = command_envelope(
-        suffix=f"{suffix}-rollback",
+        suffix=f"{suffix}-atomic-abort",
         lifecycle_id=lifecycle_id,
         repo=repo_name,
         actor_id=actor_id,
@@ -623,6 +625,172 @@ async def test_outbox_claiming_preserves_per_lifecycle_sequence_during_backoff(
             database_name,
         )
         await integration_resources.pool.execute(f'DROP DATABASE "{database_name}"')
+
+
+@pytest.mark.asyncio
+async def test_pending_obligation_rejects_command_until_canonical_evidence_unlocks(
+    integration_resources,
+) -> None:
+    suffix = uuid.uuid4().hex[:8]
+    repository, lifecycle_id, repo_name, actor_id, capability_id = await _bootstrap(
+        integration_resources, suffix
+    )
+    authority = LifecycleAuthority(repository, authority_instance="integration-obligation")
+
+    observation = repo_task_envelope(
+        suffix=f"{suffix}-work",
+        observed_at=NOW + timedelta(seconds=1),
+        repo=repo_name,
+    )
+    assert await authority.ingest_repo_task_envelope(
+        observation,
+        received_at=NOW + timedelta(seconds=1),
+    )
+    waiting = await authority.handle_command_envelope(
+        command_envelope(
+            suffix=f"{suffix}-waiting",
+            lifecycle_id=lifecycle_id,
+            repo=repo_name,
+            actor_id=actor_id,
+            capability_id=capability_id,
+            target="waiting",
+            requested_at=NOW + timedelta(seconds=2),
+        )
+    )
+    assert waiting.result.verdict == CommandVerdict.APPLIED
+
+    pending = await repository.get_lifecycle_state(lifecycle_id)
+    assert pending is not None
+    assert pending.status.value == "waiting"
+    assert pending.state_version == 2
+    assert pending.obligations[0].id == "independent-review"
+    assert pending.obligations[0].status.value == "pending"
+    active_frontier = next(
+        item for item in pending.legal_frontier if item.id == "transition:waiting:active"
+    )
+    assert active_frontier.allowed is False
+    assert active_frontier.reason_code == "PENDING_OBLIGATIONS"
+
+    rejected = await authority.handle_command_envelope(
+        command_envelope(
+            suffix=f"{suffix}-premature-active",
+            lifecycle_id=lifecycle_id,
+            repo=repo_name,
+            expected_state_version=2,
+            actor_id=actor_id,
+            capability_id=capability_id,
+            target="active",
+            requested_at=NOW + timedelta(seconds=3),
+        )
+    )
+    assert rejected.result.verdict == CommandVerdict.ILLEGAL
+    assert rejected.result.reason_code == "PENDING_OBLIGATIONS"
+    assert rejected.result.mutated is False
+    unchanged = await repository.get_lifecycle_state(lifecycle_id)
+    assert unchanged is not None
+    assert unchanged.status.value == "waiting"
+    assert unchanged.state_version == 2
+
+    evidence = obligation_evidence_envelope(
+        suffix=f"{suffix}-completed",
+        completed_at=NOW + timedelta(seconds=4),
+        lifecycle_id=lifecycle_id,
+        repo=repo_name,
+    )
+    validate_with_bloodbank(evidence)
+    assert await authority.ingest_obligation_evidence_envelope(
+        evidence,
+        received_at=NOW + timedelta(seconds=4),
+    )
+    assert not await authority.ingest_obligation_evidence_envelope(
+        evidence,
+        received_at=NOW + timedelta(seconds=5),
+    )
+
+    claimed = await repository.claim_next_reconcile_job_record(f"obligation-{suffix}")
+    assert claimed == (lifecycle_id, NOW + timedelta(seconds=4))
+    assert await authority.reconcile_claimed(
+        lifecycle_id=lifecycle_id,
+        as_of=claimed[1],
+        worker_id=f"obligation-{suffix}",
+    )
+    unlocked = await repository.get_lifecycle_state(lifecycle_id)
+    assert unlocked is not None
+    assert unlocked.status.value == "active"
+    assert unlocked.state_version == 3
+    assert unlocked.obligations == []
+
+    evidence_row = await integration_resources.pool.fetchrow(
+        """
+        SELECT source_event_id, source_event_type, source_event_subject,
+               source_event_source, source_event_producer, payload
+        FROM lifecycle_observations
+        WHERE lifecycle_id = $1 AND kind = 'obligation_evidence'
+        """,
+        lifecycle_id,
+    )
+    assert evidence_row is not None
+    assert evidence_row["source_event_id"] == uuid.UUID(evidence["id"])
+    assert evidence_row["source_event_type"] == evidence["type"]
+    assert evidence_row["source_event_subject"] == evidence["subject"]
+    assert evidence_row["source_event_source"] == evidence["source"]
+    assert evidence_row["source_event_producer"] == evidence["producer"]
+    assert json.loads(evidence_row["payload"]) == evidence["data"]
+
+    snapshots = await integration_resources.pool.fetch(
+        """
+        SELECT envelope FROM lifecycle_event_outbox
+        WHERE lifecycle_id = $1
+          AND event_type = 'bloodbank.v1.lifecycle.snapshot.updated'
+        ORDER BY event_sequence
+        """,
+        lifecycle_id,
+    )
+    assert len(snapshots) == 2
+    waiting_snapshot = json.loads(snapshots[0]["envelope"])
+    validate_with_bloodbank(waiting_snapshot)
+    assert waiting_snapshot["schemaref"].endswith(".v2")
+    assert waiting_snapshot["data"]["capabilities"][0]["capability_version"] == 1
+    assert waiting_snapshot["data"]["obligations"][0]["status"] == "pending"
+    snapshot_frontier = next(
+        item
+        for item in waiting_snapshot["data"]["legal_frontier"]
+        if item["id"] == "transition:waiting:active"
+    )
+    assert snapshot_frontier["allowed"] is False
+    assert snapshot_frontier["reason_code"] == "PENDING_OBLIGATIONS"
+
+
+@pytest.mark.asyncio
+async def test_capability_projection_migration_uses_exact_specification_version(
+    integration_resources,
+) -> None:
+    suffix = uuid.uuid4().hex[:8]
+    repository, lifecycle_id, *_ = await _bootstrap(
+        integration_resources,
+        suffix,
+        capability_version=7,
+    )
+    await integration_resources.pool.execute(
+        """
+        UPDATE lifecycle_state
+        SET capabilities = (
+            SELECT jsonb_agg(item - 'capability_version')
+            FROM jsonb_array_elements(capabilities) AS item
+        )
+        WHERE lifecycle_id = $1
+        """,
+        lifecycle_id,
+    )
+    await integration_resources.pool.execute(
+        "DELETE FROM lifecycle_schema_migrations WHERE version = '0003'"
+    )
+
+    status = await apply_migrations(integration_resources.pool)
+    assert status.current is True
+    state = await repository.get_lifecycle_state(lifecycle_id)
+    assert state is not None
+    assert state.capabilities[0].capability_version == 7
 
 
 @pytest.mark.asyncio

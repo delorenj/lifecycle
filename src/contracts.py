@@ -2,7 +2,7 @@
 
 Bloodbank remains the schema owner.  This module implements the narrow runtime
 consumer/producer surface locked to Bloodbank commit
-``cce08181ed9f6de8dd24f058b93d0dd9cda9f2bf``.  Contract drift is checked by
+``155f2d774964d1c73694ce2c576fe5f50b91eefb``.  Contract drift is checked by
 ``scripts/verify_bloodbank_contracts.py`` and all produced envelopes are tested
 with Bloodbank's canonical validator.
 """
@@ -21,16 +21,21 @@ from models import (
     IntentCommand,
     LifecycleIntent,
     Observation,
+    SkillRef,
 )
 from specification import actor_from_wire, capability_context_from_wire
 
 
-BLOODBANK_CONTRACT_COMMIT = "cce08181ed9f6de8dd24f058b93d0dd9cda9f2bf"
+BLOODBANK_CONTRACT_COMMIT = "155f2d774964d1c73694ce2c576fe5f50b91eefb"
 COMMAND_TYPE = "bloodbank.v1.lifecycle.intent.submit"
 COMMAND_SUBJECT = "bloodbank.cmd.v1.lifecycle.intent.submit"
 REPLY_SUBJECT = "bloodbank.rpy.v1.lifecycle.intent.submit"
 REPO_TASK_RECORDED_TYPE = "bloodbank.v1.repo.task.recorded"
 REPO_TASK_RECORDED_SUBJECT = "bloodbank.evt.v1.repo.task.recorded"
+OBLIGATION_EVIDENCE_TYPE = "bloodbank.v1.lifecycle.obligation_evidence.submitted"
+OBLIGATION_EVIDENCE_SUBJECT = "bloodbank.evt.v1.lifecycle.obligation_evidence.submitted"
+MOMO_SOURCE = "urn:33god:service:momo"
+MOMO_PRODUCER = "momo"
 AUTHORITY_SOURCE = "urn:33god:service:lifecycle"
 AUTHORITY_PRODUCER = "delorenj/lifecycle"
 AUTHORITY_SERVICE = "lifecycle"
@@ -390,7 +395,7 @@ def recover_intent_command(envelope: Any) -> IntentCommand:
                     if isinstance(capability.get("capability_version"), int)
                     and not isinstance(capability.get("capability_version"), bool)
                     and capability["capability_version"] >= 1
-                    else 1
+                    else 0
                 ),
                 "action": str(capability.get("action") or "malformed"),
                 "scope": str(capability.get("scope") or "malformed"),
@@ -450,6 +455,114 @@ def validate_repo_task_recorded(envelope: Any, lifecycle_id: str) -> Observation
     )
 
 
+def validate_obligation_evidence_submitted(envelope: Any) -> Observation:
+    """Validate Momo's exact completion evidence without accepting a verdict.
+
+    The event is an authority input. It can become a satisfaction observation
+    only after this strict identity, completion, and artifact-integrity check;
+    Lifecycle still performs the obligation correlation and state transition.
+    """
+
+    value = _validate_base(
+        envelope,
+        event_type=OBLIGATION_EVIDENCE_TYPE,
+        kind="event",
+        subject=OBLIGATION_EVIDENCE_SUBJECT,
+        domain="lifecycle",
+        dataschema=(
+            "apicurio://holyfields/bloodbank.v1.lifecycle.obligation_evidence.submitted/versions/1"
+        ),
+        schemaref="bloodbank.v1.lifecycle.obligation_evidence.submitted.v1",
+    )
+    if value["source"] != MOMO_SOURCE:
+        raise ContractError("SOURCE_INVALID", f"source must equal {MOMO_SOURCE!r}")
+    if value["producer"] != MOMO_PRODUCER or value["service"] != MOMO_PRODUCER:
+        raise ContractError("PRODUCER_INVALID", "producer and service must equal 'momo'")
+    actor = value["actor"]
+    if actor.get("type") != "service" or actor.get("agent_id") != "momo":
+        raise ContractError("ACTOR_INVALID", "completion evidence actor must be service momo")
+
+    data = value["data"]
+    _exact_keys(
+        data,
+        {
+            "contract_version",
+            "lifecycle_id",
+            "repo",
+            "obligation_id",
+            "obligation_kind",
+            "target_actor_id",
+            "invocation_id",
+            "skill_ref",
+            "completed_at",
+            "evidence",
+        },
+        "data",
+    )
+    if data.get("contract_version") != 1:
+        raise ContractError("CONTRACT_VERSION_UNSUPPORTED", "contract_version must be 1")
+    lifecycle_id = _nonblank(data.get("lifecycle_id"), "data.lifecycle_id")
+    _nonblank(data.get("repo"), "data.repo", whitespace_forbidden=True)
+    _nonblank(data.get("obligation_id"), "data.obligation_id")
+    _nonblank(data.get("obligation_kind"), "data.obligation_kind")
+    _nonblank(data.get("target_actor_id"), "data.target_actor_id")
+    _uuid(data.get("invocation_id"), "data.invocation_id")
+
+    skill_ref = _required_object(data.get("skill_ref"), "data.skill_ref")
+    _exact_keys(skill_ref, {"name", "selector"}, "data.skill_ref")
+    try:
+        SkillRef(
+            name=_nonblank(skill_ref.get("name"), "data.skill_ref.name"),
+            selector=_nonblank(skill_ref.get("selector"), "data.skill_ref.selector"),
+        )
+    except ValueError as exc:
+        raise ContractError("SKILL_REF_INVALID", str(exc)) from exc
+
+    completed_at = parse_timestamp(data.get("completed_at"), "data.completed_at")
+    if parse_timestamp(value["time"], "time") != completed_at:
+        raise ContractError(
+            "COMPLETION_TIME_MISMATCH",
+            "CloudEvent time must equal data.completed_at",
+        )
+    evidence = _required_object(data.get("evidence"), "data.evidence")
+    _exact_keys(
+        evidence,
+        {"kind", "outcome", "artifact_id", "artifact_sha256", "summary"},
+        "data.evidence",
+    )
+    if evidence.get("kind") != "skill_completion":
+        raise ContractError("EVIDENCE_KIND_INVALID", "evidence.kind must be skill_completion")
+    if evidence.get("outcome") != "completed":
+        raise ContractError("EVIDENCE_OUTCOME_INVALID", "evidence.outcome must be completed")
+    _nonblank(evidence.get("artifact_id"), "data.evidence.artifact_id")
+    artifact_sha256 = evidence.get("artifact_sha256")
+    if not isinstance(artifact_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", artifact_sha256):
+        raise ContractError(
+            "EVIDENCE_INTEGRITY_INVALID",
+            "data.evidence.artifact_sha256 must be lowercase SHA-256",
+        )
+    summary = _nonblank(evidence.get("summary"), "data.evidence.summary")
+    if len(summary) > 500:
+        raise ContractError("FIELD_LENGTH_INVALID", "data.evidence.summary exceeds 500 chars")
+
+    source_event_id = _uuid(value["id"], "id")
+    return Observation(
+        lifecycle_id=lifecycle_id,
+        source=value["producer"],
+        kind="obligation_evidence",
+        observed_at=completed_at,
+        payload=dict(data),
+        payload_hash=payload_sha256(data),
+        observation_id=stable_uuid(f"lifecycle-observation:{lifecycle_id}:{source_event_id}"),
+        source_event_id=source_event_id,
+        source_event_type=value["type"],
+        source_event_subject=value["subject"],
+        source_event_source=value["source"],
+        source_event_producer=value["producer"],
+        ordering_key=value["ordering_key"],
+    )
+
+
 def build_event_envelope(
     *,
     event_type: str,
@@ -459,12 +572,19 @@ def build_event_envelope(
     correlation_id: str,
     causation_id: str | None,
     authority_instance: str,
+    schema_version: int = 1,
 ) -> dict[str, Any]:
     subject = subject_for(event_type, "event")
     _uuid(event_id, "event_id")
     _uuid(correlation_id, "correlation_id")
     if causation_id is not None:
         _uuid(causation_id, "causation_id")
+    if (
+        isinstance(schema_version, bool)
+        or not isinstance(schema_version, int)
+        or schema_version < 1
+    ):
+        raise ValueError("schema_version must be an integer >= 1")
     return {
         "specversion": "1.0",
         "id": event_id,
@@ -473,13 +593,13 @@ def build_event_envelope(
         "subject": subject,
         "time": format_timestamp(occurred_at),
         "datacontenttype": "application/json",
-        "dataschema": f"apicurio://holyfields/{event_type}/versions/1",
+        "dataschema": f"apicurio://holyfields/{event_type}/versions/{schema_version}",
         "correlationid": correlation_id,
         "causationid": causation_id,
         "producer": AUTHORITY_PRODUCER,
         "service": AUTHORITY_SERVICE,
         "domain": "lifecycle",
-        "schemaref": f"{event_type}.v1",
+        "schemaref": f"{event_type}.v{schema_version}",
         "kind": "event",
         "actor": {**AUTHORITY_ACTOR, "instance": authority_instance},
         "ordering_key": f"lifecycle:{data['lifecycle_id']}",
@@ -551,6 +671,10 @@ __all__ = [
     "COMMAND_SUBJECT",
     "COMMAND_TYPE",
     "ContractError",
+    "MOMO_PRODUCER",
+    "MOMO_SOURCE",
+    "OBLIGATION_EVIDENCE_SUBJECT",
+    "OBLIGATION_EVIDENCE_TYPE",
     "REPLY_SUBJECT",
     "REPO_TASK_RECORDED_SUBJECT",
     "REPO_TASK_RECORDED_TYPE",
@@ -564,5 +688,6 @@ __all__ = [
     "stable_uuid",
     "subject_for",
     "validate_intent_command",
+    "validate_obligation_evidence_submitted",
     "validate_repo_task_recorded",
 ]

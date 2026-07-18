@@ -30,6 +30,7 @@ COMMAND_STREAM = "BLOODBANK_COMMANDS"
 EVENT_STREAM = "BLOODBANK_EVENTS"
 COMMAND_SUBJECT = "bloodbank.cmd.v1.lifecycle.intent.submit"
 OBSERVATION_SUBJECT = "bloodbank.evt.v1.repo.task.recorded"
+EVIDENCE_SUBJECT = "bloodbank.evt.v1.lifecycle.obligation_evidence.submitted"
 
 
 @dataclass
@@ -57,17 +58,20 @@ class BloodbankTransport:
         client_name: str,
         command_durable: str = "lifecycle-authority-commands-v1",
         observation_durable: str = "lifecycle-authority-repo-task-recorded-v1",
+        evidence_durable: str = "lifecycle-authority-obligation-evidence-v1",
         metrics: RuntimeMetrics | None = None,
     ) -> None:
         self.servers = servers
         self.client_name = client_name
         self.command_durable = command_durable
         self.observation_durable = observation_durable
+        self.evidence_durable = evidence_durable
         self.metrics = metrics or RuntimeMetrics()
         self.nc: NATS | None = None
         self.js: JetStreamContext | None = None
         self.command_subscription: JetStreamContext.PullSubscription | None = None
         self.observation_subscription: JetStreamContext.PullSubscription | None = None
+        self.evidence_subscription: JetStreamContext.PullSubscription | None = None
 
     @property
     def connected(self) -> bool:
@@ -75,7 +79,14 @@ class BloodbankTransport:
 
     @property
     def consumers_bound(self) -> bool:
-        return self.command_subscription is not None and self.observation_subscription is not None
+        return all(
+            subscription is not None
+            for subscription in (
+                self.command_subscription,
+                self.observation_subscription,
+                self.evidence_subscription,
+            )
+        )
 
     async def connect(self) -> None:
         if self.connected and self.consumers_bound:
@@ -139,6 +150,20 @@ class BloodbankTransport:
                     max_ack_pending=256,
                 ),
             )
+            self.evidence_subscription = await self.js.pull_subscribe(
+                EVIDENCE_SUBJECT,
+                durable=self.evidence_durable,
+                stream=EVENT_STREAM,
+                config=ConsumerConfig(
+                    durable_name=self.evidence_durable,
+                    filter_subject=EVIDENCE_SUBJECT,
+                    deliver_policy=DeliverPolicy.ALL,
+                    ack_policy=AckPolicy.EXPLICIT,
+                    ack_wait=30,
+                    max_deliver=-1,
+                    max_ack_pending=256,
+                ),
+            )
         except Exception:
             self.metrics.increment("nats_binding_failed")
             await self.close()
@@ -157,17 +182,23 @@ class BloodbankTransport:
         self.js = None
         self.command_subscription = None
         self.observation_subscription = None
+        self.evidence_subscription = None
 
     async def ready(self) -> tuple[bool, str]:
         if not self.connected or self.js is None:
             return False, "nats_disconnected"
-        if self.command_subscription is None or self.observation_subscription is None:
+        if (
+            self.command_subscription is None
+            or self.observation_subscription is None
+            or self.evidence_subscription is None
+        ):
             return False, "consumers_unbound"
         try:
             await self.js.stream_info(COMMAND_STREAM)
             await self.js.stream_info(EVENT_STREAM)
             await self.command_subscription.consumer_info()
             await self.observation_subscription.consumer_info()
+            await self.evidence_subscription.consumer_info()
             return True, "ready"
         except Exception as exc:
             return False, f"stream_unavailable:{type(exc).__name__}"
@@ -234,6 +265,26 @@ class JetStreamRuntime:
         except Exception as exc:
             self.transport.metrics.increment("observation_retry")
             logger.exception("observation_processing_failed", error=str(exc))
+            await message.nak(delay=1)
+
+    async def handle_evidence_message(self, message: Msg) -> None:
+        try:
+            envelope = json.loads(message.data)
+            inserted = await self.authority.ingest_obligation_evidence_envelope(
+                envelope,
+                received_at=self.clock(),
+            )
+            await message.ack_sync()
+            self.transport.metrics.increment(
+                "evidence_recorded" if inserted else "evidence_ignored"
+            )
+        except (json.JSONDecodeError, UnicodeDecodeError, ContractError) as exc:
+            self.transport.metrics.increment("evidence_malformed")
+            logger.warning("evidence_malformed", error=str(exc))
+            await message.term()
+        except Exception as exc:
+            self.transport.metrics.increment("evidence_retry")
+            logger.exception("evidence_processing_failed", error=str(exc))
             await message.nak(delay=1)
 
     async def publish_outbox_once(self, batch_size: int = 100) -> int:
@@ -307,6 +358,13 @@ class JetStreamRuntime:
         await self._pull_loop(
             subscription_name="observation_subscription",
             handler=self.handle_observation_message,
+            stop=stop,
+        )
+
+    async def evidence_loop(self, stop: asyncio.Event) -> None:
+        await self._pull_loop(
+            subscription_name="evidence_subscription",
+            handler=self.handle_evidence_message,
             stop=stop,
         )
 

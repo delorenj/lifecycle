@@ -326,6 +326,7 @@ async def test_partial_consumer_binding_closes_and_resets_transport(monkeypatch)
     assert transport.js is None
     assert transport.command_subscription is None
     assert transport.observation_subscription is None
+    assert transport.evidence_subscription is None
     assert transport.metrics.counters["nats_binding_failed"] == 1
 
 
@@ -359,6 +360,9 @@ async def test_service_fails_when_an_authority_worker_exits() -> None:
             raise RuntimeError("command consumer stopped")
 
         async def observation_loop(self, stop):
+            await stop.wait()
+
+        async def evidence_loop(self, stop):
             await stop.wait()
 
         async def outbox_loop(self, stop):

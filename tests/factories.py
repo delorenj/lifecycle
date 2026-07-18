@@ -103,3 +103,58 @@ def repo_task_envelope(
             "updated_at": format_timestamp(observed_at),
         },
     }
+
+
+def obligation_evidence_envelope(
+    *,
+    suffix: str,
+    completed_at: datetime,
+    lifecycle_id: str = "lc_test",
+    repo: str = "delorenj/test",
+    obligation_id: str = "independent-review",
+    obligation_kind: str = "independent_review",
+    target_actor_id: str = "agent:independent-reviewer",
+) -> dict:
+    invocation_id = test_uuid(f"obligation-invocation:{suffix}")
+    return {
+        "specversion": "1.0",
+        "id": test_uuid(f"obligation-evidence:{suffix}"),
+        "source": "urn:33god:service:momo",
+        "type": "bloodbank.v1.lifecycle.obligation_evidence.submitted",
+        "subject": "bloodbank.evt.v1.lifecycle.obligation_evidence.submitted",
+        "time": format_timestamp(completed_at),
+        "datacontenttype": "application/json",
+        "dataschema": (
+            "apicurio://holyfields/bloodbank.v1.lifecycle.obligation_evidence.submitted/versions/1"
+        ),
+        "correlationid": test_uuid(f"obligation-correlation:{suffix}"),
+        "causationid": invocation_id,
+        "producer": "momo",
+        "service": "momo",
+        "domain": "lifecycle",
+        "schemaref": "bloodbank.v1.lifecycle.obligation_evidence.submitted.v1",
+        "kind": "event",
+        "actor": {"type": "service", "agent_id": "momo"},
+        "ordering_key": f"lifecycle:{lifecycle_id}",
+        "data": {
+            "contract_version": 1,
+            "lifecycle_id": lifecycle_id,
+            "repo": repo,
+            "obligation_id": obligation_id,
+            "obligation_kind": obligation_kind,
+            "target_actor_id": target_actor_id,
+            "invocation_id": invocation_id,
+            "skill_ref": {
+                "name": "bmad-code-review",
+                "selector": "6.10.2",
+            },
+            "completed_at": format_timestamp(completed_at),
+            "evidence": {
+                "kind": "skill_completion",
+                "outcome": "completed",
+                "artifact_id": f"review:{lifecycle_id}:{obligation_id}:{suffix}",
+                "artifact_sha256": "a" * 64,
+                "summary": "Independent review completed with durable findings.",
+            },
+        },
+    }

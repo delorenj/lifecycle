@@ -16,7 +16,7 @@ from contracts import canonical_json
 from db.repository import LifecycleRepository
 from models import CapabilityGrant, CommandVerdict
 from specification import CAPABILITY_ACTION, default_spec
-from tests.factories import command_envelope, repo_task_envelope
+from tests.factories import command_envelope, obligation_evidence_envelope, repo_task_envelope
 from tests.schema_validation import validate_with_bloodbank
 
 
@@ -57,6 +57,7 @@ async def _transport(resources, suffix: str) -> BloodbankTransport:
         client_name=f"lifecycle-it-{suffix}",
         command_durable=f"lifecycle-it-command-{suffix}",
         observation_durable=f"lifecycle-it-observation-{suffix}",
+        evidence_durable=f"lifecycle-it-evidence-{suffix}",
     )
     await transport.connect()
     ready, reason = await transport.ready()
@@ -68,6 +69,7 @@ async def _delete_test_consumers(resources, suffix: str) -> None:
     for stream, durable in (
         ("BLOODBANK_COMMANDS", f"lifecycle-it-command-{suffix}"),
         ("BLOODBANK_EVENTS", f"lifecycle-it-observation-{suffix}"),
+        ("BLOODBANK_EVENTS", f"lifecycle-it-evidence-{suffix}"),
     ):
         try:
             await resources.js.delete_consumer(stream, durable)
@@ -174,6 +176,38 @@ async def test_real_canonical_observation_command_reply_and_outbox_flow(
         assert state is not None
         assert state.status.value == "waiting"
         assert state.state_version == 2
+        assert state.obligations[0].status.value == "pending"
+        waiting_frontier = next(
+            item for item in state.legal_frontier if item.id == "transition:waiting:active"
+        )
+        assert waiting_frontier.allowed is False
+        assert waiting_frontier.reason_code == "PENDING_OBLIGATIONS"
+
+        evidence = obligation_evidence_envelope(
+            suffix=f"{suffix}-completion",
+            completed_at=NOW + timedelta(seconds=4),
+            lifecycle_id=lifecycle_id,
+            repo=repo_name,
+        )
+        await integration_resources.js.publish(
+            evidence["subject"],
+            canonical_json(evidence).encode(),
+            headers={"Nats-Msg-Id": evidence["id"]},
+        )
+        evidence_messages = await transport.evidence_subscription.fetch(batch=1, timeout=2)
+        await runtime.handle_evidence_message(evidence_messages[0])
+        claimed = await repository.claim_next_reconcile_job_record(f"evidence-{suffix}")
+        assert claimed == (lifecycle_id, NOW + timedelta(seconds=4))
+        assert await authority.reconcile_claimed(
+            lifecycle_id=lifecycle_id,
+            as_of=claimed[1],
+            worker_id=f"evidence-{suffix}",
+        )
+        assert await runtime.publish_outbox_once(batch_size=20) == 3
+        state = await repository.get_lifecycle_state(lifecycle_id)
+        assert state is not None
+        assert state.status.value == "active"
+        assert state.state_version == 3
 
         events, replies = await _capture_for_lifecycle(
             integration_resources,
@@ -181,15 +215,38 @@ async def test_real_canonical_observation_command_reply_and_outbox_flow(
             suffix,
         )
         assert sorted(event["type"] for event in events) == [
+            "bloodbank.v1.lifecycle.obligation_evidence.submitted",
+            "bloodbank.v1.lifecycle.observation.recorded",
             "bloodbank.v1.lifecycle.observation.recorded",
             "bloodbank.v1.lifecycle.snapshot.updated",
+            "bloodbank.v1.lifecycle.snapshot.updated",
+            "bloodbank.v1.lifecycle.status.updated",
             "bloodbank.v1.lifecycle.status.updated",
         ]
         assert len(replies) == 1
         assert replies[0]["kind"] == "reply"
         assert replies[0]["data"]["verdict"] == "applied"
-        assert len({event["id"] for event in events}) == 3
-        for envelope in [observation, command, *events, *replies]:
+        assert len({event["id"] for event in events}) == 7
+        snapshots = [
+            event for event in events if event["type"] == "bloodbank.v1.lifecycle.snapshot.updated"
+        ]
+        assert [snapshot["schemaref"] for snapshot in snapshots] == [
+            "bloodbank.v1.lifecycle.snapshot.updated.v2",
+            "bloodbank.v1.lifecycle.snapshot.updated.v2",
+        ]
+        assert snapshots[0]["data"]["state"]["status"] == "waiting"
+        assert snapshots[0]["data"]["obligations"][0]["status"] == "pending"
+        assert (
+            next(
+                item
+                for item in snapshots[0]["data"]["legal_frontier"]
+                if item["id"] == "transition:waiting:active"
+            )["allowed"]
+            is False
+        )
+        assert snapshots[0]["data"]["capabilities"][0]["capability_version"] == 1
+        assert snapshots[1]["data"]["state"]["status"] == "active"
+        for envelope in [observation, command, evidence, *events, *replies]:
             validate_with_bloodbank(envelope)
     finally:
         await transport.close()

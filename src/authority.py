@@ -21,6 +21,7 @@ from contracts import (
     recover_intent_command,
     stable_uuid,
     validate_intent_command,
+    validate_obligation_evidence_submitted,
     validate_repo_task_recorded,
 )
 from db.repository import AuthorityBundle, LifecycleRepository
@@ -166,7 +167,7 @@ def _snapshot_data(
     publication: dict[str, Any],
 ) -> dict[str, Any]:
     return {
-        "contract_version": 1,
+        "contract_version": 2,
         "lifecycle_id": bundle.lifecycle_id,
         "repo": bundle.repo,
         "spec_version": current_state.spec_version,
@@ -291,17 +292,18 @@ def _project_command_state(
     state.state_version = bundle.state.state_version + 1
     state.status_reason = reason_code
     state.last_reconciled_at = as_of
-    state.legal_frontier = compute_frontier(
-        state,
-        bundle.spec,
-        bundle.blockers,
-        gates,
-    )
     state.obligations = compute_obligations(
         state,
         bundle.spec,
         bundle.observations,
         as_of,
+    )
+    state.legal_frontier = compute_frontier(
+        state,
+        bundle.spec,
+        bundle.blockers,
+        gates,
+        state.obligations,
     )
     state.capabilities = projected_capabilities(bundle.spec, state.state_version)
     state.state_fingerprint = state_fingerprint(state)
@@ -452,12 +454,19 @@ class LifecycleAuthority:
                         reason_code=capability_reason,
                         lifecycle_exists=True,
                     )
+                current_obligations = compute_obligations(
+                    bundle.state,
+                    bundle.spec,
+                    bundle.observations,
+                    command.requested_at,
+                )
                 legal, legal_reason = intent_is_legal(
                     command,
                     bundle.state,
                     bundle.spec,
                     bundle.blockers,
                     bundle.gates,
+                    current_obligations,
                 )
                 if not legal:
                     return await self._record_rejection(
@@ -676,41 +685,98 @@ class LifecycleAuthority:
                     return False
                 observation = validate_repo_task_recorded(envelope, lifecycle_id)
                 observation.received_at = received_at.astimezone(UTC)
-                inserted = await self.repository.insert_observation_tx(
-                    connection,
-                    observation,
+                return await self._record_observation_tx(
+                    connection=connection,
+                    observation=observation,
+                    repo=repo,
+                    envelope=envelope,
+                    received_at=received_at,
                 )
-                if not inserted:
-                    return False
 
-                event_id = stable_uuid(
-                    f"lifecycle-observation-recorded:{observation.observation_id}"
+    async def ingest_obligation_evidence_envelope(
+        self,
+        envelope: Any,
+        *,
+        received_at: datetime,
+    ) -> bool:
+        """Persist exact completion evidence as input for authority evaluation."""
+
+        observation = validate_obligation_evidence_submitted(envelope)
+        repo = str(observation.payload["repo"])
+        async with self.repository.pool.acquire() as connection:
+            async with connection.transaction():
+                bound_repo = await connection.fetchval(
+                    "SELECT repo FROM lifecycles WHERE id = $1",
+                    observation.lifecycle_id,
                 )
-                recorded = build_event_envelope(
-                    event_type=OBSERVATION_TYPE,
-                    data=_observation_data(observation, repo=repo),
-                    event_id=event_id,
-                    occurred_at=received_at,
-                    correlation_id=str(envelope["correlationid"]),
-                    causation_id=observation.source_event_id,
-                    authority_instance=self.authority_instance,
-                )
-                await self.repository.stage_outbox_tx(
+                if bound_repo is None:
+                    return False
+                if bound_repo != repo:
+                    raise ContractError(
+                        "REPO_BINDING_MISMATCH",
+                        "completion evidence repo does not match lifecycle authority binding",
+                    )
+                if not await self.repository.lock_lifecycle_tx(
                     connection,
-                    lifecycle_id=lifecycle_id,
-                    envelope=recorded,
-                    aggregate_version=None,
-                    created_at=received_at,
+                    observation.lifecycle_id,
+                ):
+                    return False
+                observation.received_at = received_at.astimezone(UTC)
+                return await self._record_observation_tx(
+                    connection=connection,
+                    observation=observation,
+                    repo=repo,
+                    envelope=envelope,
+                    received_at=received_at,
                 )
-                if observation.observed_at is None:
-                    raise ValueError("source observation time is required")
-                await self.repository.mark_dirty_tx(
-                    connection,
-                    lifecycle_id,
-                    f"observation:{observation.source_event_type}",
-                    observation.observed_at,
-                )
-                return True
+
+    async def _record_observation_tx(
+        self,
+        *,
+        connection: Any,
+        observation: Observation,
+        repo: str,
+        envelope: Mapping[str, Any],
+        received_at: datetime,
+    ) -> bool:
+        inserted = await self.repository.insert_observation_tx(connection, observation)
+        if not inserted:
+            return False
+        event_id = stable_uuid(f"lifecycle-observation-recorded:{observation.observation_id}")
+        recorded = build_event_envelope(
+            event_type=OBSERVATION_TYPE,
+            data=_observation_data(observation, repo=repo),
+            event_id=event_id,
+            occurred_at=received_at,
+            correlation_id=str(envelope["correlationid"]),
+            causation_id=observation.source_event_id,
+            authority_instance=self.authority_instance,
+        )
+        await self.repository.stage_outbox_tx(
+            connection,
+            lifecycle_id=observation.lifecycle_id,
+            envelope=recorded,
+            aggregate_version=None,
+            created_at=received_at,
+        )
+        if observation.observed_at is None:
+            raise ValueError("source observation time is required")
+        current_as_of = await connection.fetchval(
+            "SELECT last_reconciled_at FROM lifecycle_state WHERE lifecycle_id = $1",
+            observation.lifecycle_id,
+        )
+        reconcile_as_of = (
+            max(observation.observed_at, current_as_of)
+            if current_as_of is not None
+            else observation.observed_at
+        )
+        await self.repository.mark_dirty_tx(
+            connection,
+            observation.lifecycle_id,
+            f"observation:{observation.source_event_type}",
+            reconcile_as_of,
+        )
+        return True
 
     async def reconcile_claimed(
         self,
@@ -837,6 +903,7 @@ class LifecycleAuthority:
             correlation_id=correlation_id,
             causation_id=causation_id,
             authority_instance=self.authority_instance,
+            schema_version=2,
         )
         await self.repository.insert_reserved_outbox_tx(
             connection,

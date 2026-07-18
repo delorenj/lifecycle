@@ -18,6 +18,10 @@ import pytest_asyncio
 from db.migrations import apply_migrations
 
 
+POSTGRES_IMAGE = "postgres@sha256:20edbde7749f822887a1a022ad526fde0a47d6b2be9a8364433605cf65099416"
+NATS_IMAGE = "nats@sha256:b83efabe3e7def1e0a4a31ec6e078999bb17c80363f881df35edc70fcb6bb927"
+
+
 _TRANSIENT_POSTGRES_CONNECTION_ERRORS = (
     OSError,
     asyncpg.CannotConnectNowError,
@@ -158,7 +162,7 @@ def docker_stack() -> DockerStack:
             f"{postgres_volume}:/var/lib/postgresql/data",
             "-p",
             f"127.0.0.1:{postgres_port}:5432",
-            "postgres:16-alpine",
+            POSTGRES_IMAGE,
         )
         _docker(
             "run",
@@ -171,7 +175,7 @@ def docker_stack() -> DockerStack:
             f"{nats_volume}:/data",
             "-p",
             f"127.0.0.1:{nats_port}:4222",
-            "nats:2.10-alpine",
+            NATS_IMAGE,
             "-js",
             "-sd",
             "/data",

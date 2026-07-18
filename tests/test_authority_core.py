@@ -12,6 +12,7 @@ from contracts import (
     build_reply_envelope,
     recover_intent_command,
     validate_intent_command,
+    validate_obligation_evidence_submitted,
     validate_repo_task_recorded,
 )
 from models import (
@@ -23,6 +24,8 @@ from models import (
     LifecycleHealth,
     LifecycleState,
     LifecycleStatus,
+    Observation,
+    ObligationStatus,
     OperatingMode,
     Gate,
     GateKind,
@@ -32,11 +35,12 @@ from reconciler import reconcile
 from specification import (
     CAPABILITY_ACTION,
     compute_frontier,
+    compute_obligations,
     default_spec,
     intent_is_legal,
     validate_capability,
 )
-from tests.factories import command_envelope, repo_task_envelope
+from tests.factories import command_envelope, obligation_evidence_envelope, repo_task_envelope
 from tests.schema_validation import validate_with_bloodbank
 
 
@@ -97,7 +101,7 @@ def test_modes_and_legal_frontier_are_explicit_and_version_scoped() -> None:
         mode=OperatingMode.DISABLED,
         state_version=12,
     )
-    frontier = compute_frontier(state, spec, [], [])
+    frontier = compute_frontier(state, spec, [], [], [])
 
     transition_items = [item for item in frontier if item.kind.value == "state_transition"]
     assert transition_items
@@ -128,6 +132,11 @@ def test_default_obligation_is_skill_addressable() -> None:
         "name": "bmad-code-review",
         "selector": "6.10.2",
     }
+    assert obligation.owner_id == "agent:independent-reviewer"
+
+
+def test_capability_version_is_canonical_projection_data() -> None:
+    assert _grant().to_json()["capability_version"] == 1
 
 
 def test_repo_task_observation_preserves_identity_and_ignores_provider_columns() -> None:
@@ -186,13 +195,167 @@ def test_transition_guards_fail_closed_on_blockers_and_gates() -> None:
     gate = Gate(id="gate-review", kind=GateKind.HUMAN_REVIEW)
     blocker = Blocker(id="blocker-ci", kind=BlockerKind.CI_FAILING)
 
-    gate_legal, gate_reason = intent_is_legal(command, state, spec, [], [gate])
-    blocker_legal, blocker_reason = intent_is_legal(command, state, spec, [blocker], [])
+    gate_legal, gate_reason = intent_is_legal(command, state, spec, [], [gate], [])
+    blocker_legal, blocker_reason = intent_is_legal(command, state, spec, [blocker], [], [])
 
     assert gate_legal is False
     assert gate_reason == "BLOCKING_GATE_OPEN"
     assert blocker_legal is False
     assert blocker_reason == "BLOCKING_BLOCKER_OPEN"
+
+
+def test_waiting_obligation_blocks_frontier_and_automatic_progression() -> None:
+    previous = LifecycleState(
+        lifecycle_id="lc_test",
+        status=LifecycleStatus.WAITING,
+        health=LifecycleHealth.NOMINAL,
+        state_version=4,
+        last_reconciled_at=NOW,
+    )
+    result = reconcile(
+        "lc_test",
+        previous,
+        [],
+        [],
+        [],
+        [],
+        {},
+        spec=default_spec("lc_test"),
+        as_of=NOW + timedelta(seconds=1),
+    )
+
+    assert result.current_state.status == LifecycleStatus.WAITING
+    assert result.current_state.status_reason == "PENDING_OBLIGATIONS"
+    assert result.current_state.obligations[0].status == ObligationStatus.PENDING
+    transition = next(
+        item
+        for item in result.current_state.legal_frontier
+        if item.id == "transition:waiting:active"
+    )
+    assert transition.allowed is False
+    assert transition.reason_code == "PENDING_OBLIGATIONS"
+    command = validate_intent_command(
+        command_envelope(
+            suffix="pending-obligation",
+            expected_state_version=4,
+            target="active",
+            requested_at=NOW + timedelta(seconds=1),
+        )
+    )
+    legal, reason = intent_is_legal(
+        command,
+        previous,
+        default_spec("lc_test"),
+        [],
+        [],
+        result.current_state.obligations,
+    )
+    assert legal is False
+    assert reason == "PENDING_OBLIGATIONS"
+
+
+def test_only_exact_completion_evidence_satisfies_and_unlocks_progression() -> None:
+    spec = default_spec("lc_test")
+    previous = LifecycleState(
+        lifecycle_id="lc_test",
+        status=LifecycleStatus.WAITING,
+        health=LifecycleHealth.NOMINAL,
+        state_version=4,
+        last_reconciled_at=NOW,
+    )
+    evidence_wire = obligation_evidence_envelope(
+        suffix="complete",
+        completed_at=NOW + timedelta(seconds=1),
+    )
+    validate_with_bloodbank(evidence_wire)
+    evidence = validate_obligation_evidence_submitted(evidence_wire)
+    obligations = compute_obligations(
+        previous,
+        spec,
+        [evidence],
+        NOW + timedelta(seconds=1),
+    )
+    assert obligations[0].status == ObligationStatus.SATISFIED
+
+    result = reconcile(
+        "lc_test",
+        previous,
+        [evidence],
+        [],
+        [],
+        [],
+        {},
+        spec=spec,
+        as_of=NOW + timedelta(seconds=1),
+    )
+    assert result.current_state.status == LifecycleStatus.ACTIVE
+    assert result.current_state.status_reason == "PROGRESSING"
+
+    fake = Observation(
+        lifecycle_id="lc_test",
+        source="test",
+        kind="repo_task_event",
+        observed_at=NOW + timedelta(seconds=1),
+        payload={
+            "obligation_id": "independent-review",
+            "obligation_satisfied": True,
+        },
+        observation_id="fake-observation",
+        source_event_id="fake-event",
+        source_event_type="bloodbank.v1.repo.task.recorded",
+        source_event_subject="bloodbank.evt.v1.repo.task.recorded",
+        source_event_source="urn:33god:integration:test",
+        source_event_producer="test",
+        ordering_key="task:fake",
+    )
+    held = reconcile(
+        "lc_test",
+        previous,
+        [fake],
+        [],
+        [],
+        [],
+        {},
+        spec=spec,
+        as_of=NOW + timedelta(seconds=1),
+    )
+    assert held.current_state.status == LifecycleStatus.WAITING
+    assert held.current_state.obligations[0].status == ObligationStatus.PENDING
+
+
+@pytest.mark.parametrize(
+    ("path", "value", "reason"),
+    [
+        (("data", "evidence", "kind"), "skill_invocation", "EVIDENCE_KIND_INVALID"),
+        (("data", "evidence", "outcome"), "requested", "EVIDENCE_OUTCOME_INVALID"),
+        (("data", "target_actor_id"), "agent:other", None),
+    ],
+)
+def test_completion_evidence_rejects_noncompletion_and_cannot_match_wrong_actor(
+    path: tuple[str, ...],
+    value: str,
+    reason: str | None,
+) -> None:
+    envelope = obligation_evidence_envelope(suffix="invalid", completed_at=NOW)
+    target = envelope
+    for segment in path[:-1]:
+        target = target[segment]
+    target[path[-1]] = value
+    if reason is not None:
+        with pytest.raises(ContractError) as raised:
+            validate_obligation_evidence_submitted(envelope)
+        assert raised.value.reason_code == reason
+        return
+    observation = validate_obligation_evidence_submitted(envelope)
+    state = LifecycleState(
+        lifecycle_id="lc_test",
+        status=LifecycleStatus.WAITING,
+        health=LifecycleHealth.NOMINAL,
+    )
+    assert (
+        compute_obligations(state, default_spec("lc_test"), [observation], NOW)[0].status
+        == ObligationStatus.PENDING
+    )
 
 
 def test_command_contract_and_kind_correct_reply_verdicts() -> None:
@@ -260,15 +423,15 @@ def test_spec_version_change_is_authoritative_state_change() -> None:
     [
         (
             OperatingMode.AUTONOMOUS,
-            LifecycleStatus.ACTIVE,
+            LifecycleStatus.WAITING,
             LifecycleHealth.DEGRADED,
-            "OBSERVATIONS_MISSING",
+            "PENDING_OBLIGATIONS",
         ),
         (
             OperatingMode.SUPERVISED,
-            LifecycleStatus.ACTIVE,
+            LifecycleStatus.WAITING,
             LifecycleHealth.DEGRADED,
-            "OBSERVATIONS_MISSING",
+            "PENDING_OBLIGATIONS",
         ),
         (
             OperatingMode.MANUAL,

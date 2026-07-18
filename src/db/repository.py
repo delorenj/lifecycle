@@ -1187,7 +1187,7 @@ def _row_to_state(row: Any) -> LifecycleState:
     capabilities = [
         CapabilityGrant(
             capability_id=item["capability_id"],
-            capability_version=int(item.get("capability_version", 1)),
+            capability_version=int(item["capability_version"]),
             actor_id=item["actor_id"],
             actions=tuple(item["actions"]),
             scope=item["scope"],

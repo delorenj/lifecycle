@@ -19,8 +19,14 @@ SCHEMA_BY_REF = {
     "bloodbank.v1.lifecycle.observation.recorded.v1": (
         "bloodbank/v1/lifecycle/observation.recorded.v1.json"
     ),
+    "bloodbank.v1.lifecycle.obligation_evidence.submitted.v1": (
+        "bloodbank/v1/lifecycle/obligation_evidence.submitted.v1.json"
+    ),
     "bloodbank.v1.lifecycle.snapshot.updated.v1": (
         "bloodbank/v1/lifecycle/snapshot.updated.v1.json"
+    ),
+    "bloodbank.v1.lifecycle.snapshot.updated.v2": (
+        "bloodbank/v1/lifecycle/snapshot.updated.v2.json"
     ),
     "bloodbank.v1.lifecycle.status.updated.v1": ("bloodbank/v1/lifecycle/status.updated.v1.json"),
     "bloodbank.v1.repo.task.recorded.v1": ("bloodbank/v1/repo/task.recorded.v1.json"),

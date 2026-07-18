@@ -37,6 +37,7 @@ from specification import (
     compute_obligations,
     default_spec,
     projected_capabilities,
+    transition_guard_reason,
 )
 
 
@@ -393,6 +394,12 @@ def reconcile(
         spec_version=authority_spec.version,
         mode=seed_state.mode,
     )
+    departure_obligations = compute_obligations(
+        current_state,
+        authority_spec,
+        eligible_observations,
+        decision_time,
+    )
     verdict = evaluate_lifecycle(
         current_state=current_state,
         observations=eligible_observations,
@@ -403,6 +410,22 @@ def reconcile(
         as_of=decision_time,
         require_observations=spec is not None,
     )
+    automatic_guard = transition_guard_reason(
+        current_state,
+        verdict.status,
+        authority_spec,
+        active_blockers,
+        active_gates,
+        departure_obligations,
+    )
+    if automatic_guard is not None:
+        verdict = LifecycleVerdict(
+            status=current_state.status,
+            health=verdict.health,
+            reason=automatic_guard,
+            blockers=verdict.blockers,
+            signals=verdict.signals,
+        )
     current_state.status = verdict.status
     current_state.health = verdict.health
     current_state.status_reason = verdict.reason
@@ -432,11 +455,15 @@ def reconcile(
 
     provisional_version = 1 if previous_state is None else previous_state.state_version
     current_state.state_version = provisional_version
-    current_state.legal_frontier = compute_frontier(
-        current_state, authority_spec, active_blockers, active_gates
-    )
     current_state.obligations = compute_obligations(
         current_state, authority_spec, eligible_observations, decision_time
+    )
+    current_state.legal_frontier = compute_frontier(
+        current_state,
+        authority_spec,
+        active_blockers,
+        active_gates,
+        current_state.obligations,
     )
     current_state.capabilities = projected_capabilities(authority_spec, provisional_version)
     provisional_fingerprint = state_fingerprint(current_state)
@@ -446,7 +473,11 @@ def reconcile(
     if previous_state is not None and state_changed:
         current_state.state_version = previous_state.state_version + 1
         current_state.legal_frontier = compute_frontier(
-            current_state, authority_spec, active_blockers, active_gates
+            current_state,
+            authority_spec,
+            active_blockers,
+            active_gates,
+            current_state.obligations,
         )
         current_state.capabilities = projected_capabilities(
             authority_spec, current_state.state_version

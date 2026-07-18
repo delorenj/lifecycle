@@ -34,7 +34,8 @@ forward migrations are current.
 
 - `/livez` proves only that the process and HTTP loop are alive.
 - `/readyz` proves current migrations, PostgreSQL access, NATS connectivity,
-  both canonical Bloodbank streams, and both durable consumer bindings.
+  both canonical Bloodbank streams, and all three durable consumer bindings:
+  commands, repository observations, and obligation-completion evidence.
 - `/metrics` exposes small process counters for command verdicts, consumer
   retries, reconnects, and outbox delivery.
 
@@ -55,6 +56,14 @@ forward migrations are current.
 - Source `bloodbank.v1.repo.task.recorded` identity, time, provenance, ordering
   key, payload, and payload hash are preserved without interpreting provider
   columns as lifecycle truth.
+- A pending obligation is computed before the legal frontier and prevents both
+  automatic and submitted transitions guarded by `no_pending_obligations`.
+  Invocation or review-request facts never satisfy it. Only the canonical
+  Bloodbank completion-evidence event with the exact obligation, skill, target
+  actor, completion artifact, and authoritative Momo provenance can do so.
+- Authority snapshots use the versioned Bloodbank v2 snapshot contract and
+  publish each grant's authority-owned `capability_version`; clients must carry
+  that projected value back unchanged rather than choosing a default.
 - NATS acknowledgement happens after PostgreSQL commit. Publisher failure never
   rolls back committed authority state, append-only history, idempotency records,
   or outbox envelopes.
@@ -90,20 +99,21 @@ not define root Compose; the 33GOD platform layer owns that composition.
 
 ## Current 33GOD integration
 
-The implemented 33GOD local slice runs revision
-`715ab2ea62bcece488c8d6029869af8d3651c39a` from the immutable image
-`ghcr.io/delorenj/lifecycle@sha256:e391a8aab13ca582e2026846a268a6a228c7b63c25e5d469255572e4b2988526`.
-Root Compose supplies a dedicated PostgreSQL authority volume and runs the
-published CLI in this fail-closed order: `migrate`, deterministic `bootstrap`,
-then `serve`. It does not rebuild or substitute the image.
+The implemented 33GOD local slice is built from a committed Lifecycle source
+revision and consumed by root Compose through its matching immutable registry
+digest. Root Compose supplies a dedicated PostgreSQL authority volume and runs
+the published CLI in this fail-closed order: `migrate`, deterministic
+`bootstrap`, then `serve`. It does not rebuild or substitute the image. The
+root platform validator is the current source for the exact deployed digest.
 
-Lifecycle consumes observations and commands and publishes snapshots and stable
-command verdicts through Bloodbank's canonical JetStream streams. Candystore's
-durable consumers replay those publications into a read-only projection. Momo
-may rank the returned legal frontier and resolve authoritative obligation skill
-references; Holocene may render that projection and submit high-level commands.
-Neither client, Candystore, Bloodbank, nor root Compose derives or writes
-Lifecycle truth.
+Lifecycle consumes repository observations, obligation-completion evidence, and
+commands and publishes snapshots and stable command verdicts through
+Bloodbank's canonical JetStream streams. Candystore's durable consumers replay
+those publications into a read-only projection. Momo may choose legal actor
+work, resolve authoritative obligation skill references, publish completed-skill
+evidence, and submit commands. Holocene may render that projection and submit
+high-level commands. Neither client, Candystore, Bloodbank, nor root Compose
+derives or writes Lifecycle truth.
 
 The exercised local integration proves restart catch-up without duplicate
 transition effects, rejection without mutation for stale versions and invalid

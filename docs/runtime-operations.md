@@ -4,16 +4,15 @@
 
 Run `migrate` as a one-shot job before starting or updating service instances.
 Migrations are forward-only, checksum recorded, and serialized with a
-PostgreSQL advisory lock. A checksum mismatch fails closed. Before a production
-migration, back up the Lifecycle-owned database and record counts/fingerprints
-for state, history, command results, observations, and unpublished outbox rows.
-The first standalone migration refuses pre-existing extracted controller tables;
-move legacy facts through an explicit audited export/import into a clean database.
+PostgreSQL advisory lock. A checksum mismatch fails closed. Each migration runs
+in one database transaction, so a failed statement leaves neither a partial
+schema change nor a migration-ledger row. The first standalone migration refuses
+pre-existing extracted controller tables; move legacy facts through an explicit
+audited export/import into a clean database.
 
 Service mode never applies migrations implicitly. It starts only against a
 current schema, then readiness continuously verifies schema state and database
-access. Rollback means restoring the backed-up Lifecycle database and running a
-previous immutable image; do not reverse individual append-only history rows.
+access.
 
 ## NATS interruption
 
@@ -39,6 +38,11 @@ identity required by the reply schema are terminated as poison and counted.
 Transient database/transport failures are negatively acknowledged for durable
 redelivery. Canonical but unbound repository observations are acknowledged and
 ignored because the consumer sees the platform-wide repo task subject.
+Obligation-completion evidence is separately schema validated and durably
+consumed. It is rejected unless it carries exact Momo source/producer identity,
+obligation and skill identity, target actor, completion time, and a completed
+artifact. An invocation request or review-request event is not completion
+evidence and cannot satisfy an obligation.
 
 ## Concurrency and replay
 

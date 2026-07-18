@@ -97,6 +97,7 @@ class LifecycleService:
             asyncio.create_task(self._connection_loop(stop), name="bloodbank-connect"),
             asyncio.create_task(self.runtime.command_loop(stop), name="command-consumer"),
             asyncio.create_task(self.runtime.observation_loop(stop), name="observation-consumer"),
+            asyncio.create_task(self.runtime.evidence_loop(stop), name="evidence-consumer"),
             asyncio.create_task(self.runtime.outbox_loop(stop), name="outbox-publisher"),
             asyncio.create_task(self._reconcile_loop(stop), name="reconciler"),
             asyncio.create_task(self._sweep_loop(stop), name="sweeper"),
