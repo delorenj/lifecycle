@@ -1,0 +1,16 @@
+{
+  "bloodbank_commit": "cce08181ed9f6de8dd24f058b93d0dd9cda9f2bf",
+  "files": {
+    "compose/nats/streams.json": "9fb13b307d5f9126dce9a828e425dea30a68dd4f151621221213ce070fa7d4e6",
+    "docs/lifecycle-contracts.md": "f828f7a220ecd9a2334227d7138db3181722f9bf6363e198ed0d8d2e706285e7",
+    "schemas/_common/cloudevent_base.v1.json": "894c1249d267d82de4c53e9988db1827ee4644ffa1c950c414b44654646afa4b",
+    "schemas/_common/lifecycle_contracts.v1.json": "05edec5b90795c5dffd2cfd196e2ffb7c6c6cc5e2cddbc567af99124882d5242",
+    "schemas/_common/types.v1.json": "b189bace8456645becaf9e137bc4df69c63f7d214ecb26001b8b8d495aa35216",
+    "schemas/bloodbank/v1/lifecycle/intent.submit.command.v1.json": "ebc36a835a2e3ce3cb96519890d4fca82693735ceddec1abede07c9d0ecaf2bf",
+    "schemas/bloodbank/v1/lifecycle/intent.submit.reply.v1.json": "144bb03750350ecbfd24ea6805baebf970f41cab4f7c999c2c3af25eba451cd0",
+    "schemas/bloodbank/v1/lifecycle/observation.recorded.v1.json": "0b7e43f253f3765d54a920e9470056b967b14d1116c7d0931a6552083cda20b0",
+    "schemas/bloodbank/v1/lifecycle/snapshot.updated.v1.json": "e62ef48d72e778fa1d52b9ccc0c77d5e17915d18e66d9d047396e4e582803f3a",
+    "schemas/bloodbank/v1/lifecycle/status.updated.v1.json": "fa5dc1e98390ad26cab35799810224de5d722373e86188ce48bfc73377d5372e",
+    "schemas/bloodbank/v1/repo/task.recorded.v1.json": "930b95266ddc8a4dd990c0c749dab325217ffa6a30ec54dbeab470556d0f6ee5"
+  }
+}

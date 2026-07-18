@@ -1,18 +1,22 @@
 [project]
-name = "lifecycle-controller"
-version = "0.1.0"
-description = "Bloodbank lifecycle controller — reconciles lifecycle state from sentinel observations"
+name = "lifecycle-authority"
+version = "1.0.0"
+description = "Standalone deterministic lifecycle authority for 33GOD"
 requires-python = ">=3.12"
 dependencies = [
-    "asyncpg>=0.29",
-    "structlog>=24.1",
+    "aiohttp==3.14.1",
+    "asyncpg==0.31.0",
+    "nats-py==2.15.0",
+    "structlog==25.5.0",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=8.0",
-    "pytest-asyncio>=0.23",
-    "ruff>=0.4",
+    "jsonschema==4.26.0",
+    "mypy==2.3.0",
+    "pytest==9.0.3",
+    "pytest-asyncio==1.4.0",
+    "ruff==0.15.15",
 ]
 
 [tool.ruff]
@@ -23,3 +27,20 @@ target-version = "py312"
 asyncio_mode = "auto"
 pythonpath = ["src"]
 testpaths = ["tests"]
+markers = [
+    "integration: isolated PostgreSQL/NATS container tests",
+]
+
+[tool.mypy]
+python_version = "3.12"
+mypy_path = "src"
+explicit_package_bases = true
+check_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+exclude = ["tests/"]
+
+[[tool.mypy.overrides]]
+module = "asyncpg.*"
+ignore_missing_imports = true

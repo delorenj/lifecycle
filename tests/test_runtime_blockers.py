@@ -1,15 +1,18 @@
 """Regression tests for lifecycle-controller runtime blockers."""
+
 from __future__ import annotations
 
-from types import SimpleNamespace
+import asyncio
+from datetime import datetime, timezone
 
 import pytest
 
+import bloodbank as bloodbank_module
+from bloodbank import BloodbankTransport, JetStreamRuntime, RuntimeMetrics
 from db.repository import LifecycleRepository, _row_to_state
 from main import _redact_database_url
-from models import LifecycleHealth, LifecycleState, LifecycleStatus, OutboxEvent
-from outbox_publisher import OutboxPublisher
-import worker as worker_module
+from models import OutboxEvent
+from service import LifecycleService
 from worker import ReconcileWorker
 
 
@@ -135,65 +138,41 @@ def test_row_to_state_decodes_jsonb_policy_string():
 @pytest.mark.parametrize("state_changed", [True, False])
 @pytest.mark.asyncio
 async def test_successful_reconcile_deletes_queue_job(monkeypatch, state_changed: bool):
+    del monkeypatch
+
     class FakeRepo:
         def __init__(self) -> None:
-            self.deleted = []
             self.released = []
 
-        async def claim_next_reconcile_job(self, worker_id: str, lease_seconds: int = 60):
-            return "lc_1"
-
-        async def get_lifecycle_state(self, lifecycle_id: str):
-            return LifecycleState(
-                lifecycle_id=lifecycle_id,
-                status=LifecycleStatus.ACTIVE,
-                health=LifecycleHealth.NOMINAL,
-            )
-
-        async def get_recent_observations(self, lifecycle_id: str):
-            return []
-
-        async def get_active_blockers(self, lifecycle_id: str):
-            return []
-
-        async def get_active_gates(self, lifecycle_id: str):
-            return []
-
-        async def get_checkpoints(self, lifecycle_id: str):
-            return []
-
-        async def get_sentinel_health(self):
-            return {}
-
-        async def persist_reconcile_result(self, lifecycle_id, state, outbox_events):
-            return None
-
-        async def delete_reconcile_job(self, lifecycle_id: str):
-            self.deleted.append(lifecycle_id)
+        async def claim_next_reconcile_job_record(self, worker_id: str, lease_seconds: int = 60):
+            assert worker_id == "worker-a"
+            assert lease_seconds == 60
+            return "lc_1", datetime(2026, 7, 18, tzinfo=timezone.utc)
 
         async def release_lease(self, lifecycle_id: str, requeue_delay_seconds: int = 0):
             self.released.append((lifecycle_id, requeue_delay_seconds))
 
-    current_state = LifecycleState(
-        lifecycle_id="lc_1",
-        status=LifecycleStatus.ACTIVE,
-        health=LifecycleHealth.NOMINAL,
-    )
+    class FakeAuthority:
+        def __init__(self) -> None:
+            self.calls = []
 
-    def fake_reconcile(**kwargs):
-        return SimpleNamespace(
-            current_state=current_state,
-            outbox_events=[],
-            state_changed=state_changed,
-        )
+        async def reconcile_claimed(self, **kwargs):
+            self.calls.append(kwargs)
+            return state_changed
 
     repo = FakeRepo()
-    monkeypatch.setattr(worker_module, "reconcile", fake_reconcile)
+    authority = FakeAuthority()
 
-    worked = await ReconcileWorker(repo, worker_id="worker-a").run_once()
+    worked = await ReconcileWorker(repo, worker_id="worker-a", authority=authority).run_once()
 
     assert worked is True
-    assert repo.deleted == ["lc_1"]
+    assert authority.calls == [
+        {
+            "lifecycle_id": "lc_1",
+            "as_of": datetime(2026, 7, 18, tzinfo=timezone.utc),
+            "worker_id": "worker-a",
+        }
+    ]
     assert repo.released == []
 
 
@@ -203,28 +182,57 @@ async def test_default_outbox_publish_keeps_event_unpublished():
         def __init__(self) -> None:
             self.published = []
             self.failed = []
+            self.claim_calls = 0
 
-        async def get_unpublished_outbox(self, batch_size: int):
+        async def claim_outbox(
+            self,
+            worker_id: str,
+            *,
+            batch_size: int,
+            lease_seconds: int,
+        ):
+            assert worker_id == "publisher-test"
+            assert lease_seconds == 30
+            self.claim_calls += 1
+            if self.claim_calls > 1:
+                return []
+            assert batch_size == 100
             return [
                 OutboxEvent(
                     id=123,
                     lifecycle_id="lc_1",
                     event_type="bloodbank.v1.lifecycle.status.updated",
+                    event_id="00000000-0000-4000-8000-000000000123",
+                    subject="bloodbank.evt.v1.lifecycle.status.updated",
+                    envelope={"id": "00000000-0000-4000-8000-000000000123"},
                 )
             ]
 
-        async def mark_outbox_published(self, outbox_id: int):
+        async def mark_outbox_published(self, outbox_id: int, worker_id: str):
             self.published.append(outbox_id)
 
-        async def mark_outbox_failed(self, outbox_id: int, error: str):
+        async def mark_outbox_failed(self, outbox_id: int, error: str, worker_id: str):
             self.failed.append((outbox_id, error))
 
+    class UnavailableTransport:
+        def __init__(self) -> None:
+            self.metrics = RuntimeMetrics()
+
+        async def publish_outbox(self, event: OutboxEvent) -> None:
+            del event
+            raise RuntimeError("Bloodbank JetStream is unavailable")
+
     repo = FakeRepo()
-    published_count = await OutboxPublisher(repo).run_once()
+    published_count = await JetStreamRuntime(
+        repository=repo,
+        authority=object(),
+        transport=UnavailableTransport(),
+        worker_id="publisher-test",
+    ).publish_outbox_once()
 
     assert published_count == 0
     assert repo.published == []
-    assert repo.failed == [(123, "outbox publisher is not configured")]
+    assert repo.failed == [(123, "Bloodbank JetStream is unavailable")]
 
 
 def test_redact_database_url_credentials():
@@ -235,3 +243,147 @@ def test_redact_database_url_credentials():
     assert _redact_database_url("postgresql://localhost:5432/candystore") == (
         "postgresql://localhost:5432/candystore"
     )
+
+
+@pytest.mark.asyncio
+async def test_authority_bundle_observation_query_has_no_hidden_limit() -> None:
+    class CaptureConnection:
+        def __init__(self) -> None:
+            self.sql = ""
+            self.args = ()
+
+        async def fetch(self, sql: str, *args):
+            self.sql = sql
+            self.args = args
+            return []
+
+    connection = CaptureConnection()
+    repo = LifecycleRepository(object())
+
+    assert (
+        await repo._get_observations(
+            connection,
+            "lc_1",
+            datetime(2026, 7, 18, tzinfo=timezone.utc),
+        )
+        == []
+    )
+    assert "LIMIT" not in connection.sql
+    assert connection.args == (
+        "lc_1",
+        datetime(2026, 7, 18, tzinfo=timezone.utc),
+    )
+
+
+@pytest.mark.asyncio
+async def test_partial_consumer_binding_closes_and_resets_transport(monkeypatch) -> None:
+    class FakeJetStream:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def pull_subscribe(self, *args, **kwargs):
+            del args, kwargs
+            self.calls += 1
+            if self.calls == 2:
+                raise RuntimeError("observation binding failed")
+            return object()
+
+    class FakeNats:
+        def __init__(self) -> None:
+            self.is_connected = True
+            self.is_closed = False
+            self.closed = False
+            self.js = FakeJetStream()
+
+        def jetstream(self):
+            return self.js
+
+        async def flush(self, timeout: float):
+            del timeout
+
+        async def close(self):
+            self.closed = True
+            self.is_closed = True
+            self.is_connected = False
+
+    fake_nats = FakeNats()
+
+    async def fake_connect(**kwargs):
+        del kwargs
+        return fake_nats
+
+    monkeypatch.setattr(bloodbank_module.nats, "connect", fake_connect)
+    transport = BloodbankTransport(
+        servers=["nats://test.invalid:4222"],
+        client_name="partial-binding-test",
+    )
+
+    with pytest.raises(RuntimeError, match="observation binding failed"):
+        await transport.connect()
+
+    assert fake_nats.closed is True
+    assert transport.nc is None
+    assert transport.js is None
+    assert transport.command_subscription is None
+    assert transport.observation_subscription is None
+    assert transport.metrics.counters["nats_binding_failed"] == 1
+
+
+@pytest.mark.asyncio
+async def test_service_fails_when_an_authority_worker_exits() -> None:
+    class FakeHealth:
+        def __init__(self) -> None:
+            self.started = False
+            self.stopped = False
+
+        async def start(self):
+            self.started = True
+
+        async def stop(self):
+            self.stopped = True
+
+    class FakeTransport:
+        connected = True
+        consumers_bound = True
+        nc = None
+
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def close(self):
+            self.closed = True
+
+    class FakeRuntime:
+        async def command_loop(self, stop):
+            del stop
+            raise RuntimeError("command consumer stopped")
+
+        async def observation_loop(self, stop):
+            await stop.wait()
+
+        async def outbox_loop(self, stop):
+            await stop.wait()
+
+    class FakeWorker:
+        async def run_once(self):
+            return False
+
+    class FakeSweeper:
+        async def run_once(self):
+            return 0
+
+    service = object.__new__(LifecycleService)
+    service.health = FakeHealth()
+    service.transport = FakeTransport()
+    service.runtime = FakeRuntime()
+    service.reconcile_worker = FakeWorker()
+    service.sweeper = FakeSweeper()
+    stop = asyncio.Event()
+
+    with pytest.raises(RuntimeError, match="command consumer stopped"):
+        await service.run(stop)
+
+    assert stop.is_set()
+    assert service.health.started is True
+    assert service.health.stopped is True
+    assert service.transport.closed is True

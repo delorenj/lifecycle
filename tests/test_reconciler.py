@@ -1,4 +1,5 @@
 """Tests for the lifecycle reconciler, dogfooded on Drumjangler."""
+
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
@@ -213,7 +214,9 @@ class TestReconcileDrumjangler:
         assert result.current_state.status == LifecycleStatus.BLOCKED
         assert result.current_state.health == LifecycleHealth.BLOCKED
         # Should emit lifecycle.status.updated
-        assert any(e.event_type == "bloodbank.v1.lifecycle.status.updated" for e in result.outbox_events)
+        assert any(
+            e.event_type == "bloodbank.v1.lifecycle.status.updated" for e in result.outbox_events
+        )
 
     def test_drumjangler_stalled_no_commits(self):
         """No commits in 2+ hours despite runnable work."""
@@ -224,7 +227,10 @@ class TestReconcileDrumjangler:
         )
         obs = [
             _observation("work_items_snapshot", {"open_count": 3, "runnable_count": 2}),
-            _observation("repo_activity_snapshot", {"last_commit_at": (NOW - timedelta(minutes=120)).isoformat()}),
+            _observation(
+                "repo_activity_snapshot",
+                {"last_commit_at": (NOW - timedelta(minutes=120)).isoformat()},
+            ),
         ]
         result = reconcile(
             lifecycle_id="lc_drumjangler_mvp",
