@@ -1,0 +1,35 @@
+# mise configuration for Lifecycle
+# https://mise.jdx.dev/configuration.html
+
+[env]
+_.path = [".mise/scripts", "agents/hermes/pm"]
+_.file = [".env"]
+
+# This block will handle the linking of
+# agent files to the main AGENTS.md file.
+#
+# TODO: Ensure this works for all levels of nesting.
+# i.e. All linked agent files MUST be siblings at
+# any given level of nesting.
+#
+# NOTE: hooks are an array of [[hooks.enter]] tables (NOT enter = [ ... ]) and
+# every  path is single-quoted so it survives a space in the
+# project path — mise runs each `script` via `sh -c`.
+[[hooks.enter]]
+script = "'{{config_root}}/.mise/scripts/link-agentfiles.sh'"
+[[hooks.enter]]
+script = "op inject -i .env.op > .env"
+[[hooks.enter]]
+script = "[ -f '{{config_root}}/.mise/scripts/codegraph.sh' ] && '{{config_root}}/.mise/scripts/codegraph.sh' || true"
+
+[[watch_files]]
+patterns = ["AGENTS.md"]
+task = "link-agentfiles"
+
+[tasks.link-agentfiles]
+description = "Symlink all agent files to AGENTS.md"
+run = "'{{config_root}}/.mise/scripts/link-agentfiles.sh'"
+
+[tasks.hindsight-setup]
+description = "Provision this dev's shared project Hindsight key from 1Password into .env (op inject)"
+run = "'{{config_root}}/.mise/scripts/hindsight-setup.sh'"

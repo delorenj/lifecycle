@@ -1,0 +1,123 @@
+STAGING/
+*/**/tmp/*
+**/.tmp/
+CLAUDE.md
+GEMINI.md
+node_modules
+*.mp4
+*.mp3
+*.zip
+*.aab
+.lastagent
+# AI & LLM Tools Artifacts
+##################################
+# General AI/ML
+*.pt
+*.pth
+*.onnx
+*.safetensors
+*.ckpt
+*.checkpoint
+*.h5
+*.hdf5
+
+# Ollama - Model files and logs
+/Users/Shared/Ollama/
+
+# LM Studio - Models, logs, and cache
+~/.cache/lm-studio/
+*.log
+.cache
+
+# LLM Conversation History & Memory
+##################################
+# Generic history/log files
+*.history
+*.log
+!important.log # Example of how to exclude a specific log file
+
+# Specific tool memory/state files
+.conv-history
+.llm_memory.json
+
+# Python & Environment Artifacts
+##################################
+# Virtual environments
+venv/
+.venv/
+env/
+.env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# IDE & Editor Files
+##################################
+# VSCode
+.vscode/
+
+# JetBrains (PyCharm, etc.)
+.idea/
+
+# Vi/Vim swap and backup files
+*.swp
+*.swo
+*~
+
+# Secrets & Credentials
+##################################
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# Credentials files
+credentials.json
+secrets.toml
+*.key
+*.pem
+
+# LLM Tools and Utils
+.specstory
+roo/
+.roo*
+.clinerules-*
+
+.bk
+.bak
+.backup*
+.claude-flow/metrics/agent-metrics.json
+.claude-flow/metrics/performance.json
+.claude-flow/metrics/system-metrics.json
+.claude-flow/metrics/task-metrics.json
+.claude-flow/**/*
+.claude-flow
+
+# ── Generated agent-CLI config dirs ──────────────────────────────────────────
+# Canonical, committed source of truth is .agents/ (deliberately NOT ignored).
+# Every per-CLI dir below is GENERATED from .agents/ — skills via `lnc`
+# (symlink_dir_contents), agent files via link-agentfiles — by the mise `enter`
+# hook. Never commit them; edit .agents/ instead.
+.claude/
+.gemini/
+.codex/
+.kimi/
+.augment/
+.openclaw/
+.opencode/
+.cursor/
+.crush/
+
+# Secrets + per-dev agent-hook/skill overrides (see .agents/local.example.json)
+.env
+.env.*
+!.env.op
+.agents/local.json
+.kimi-code/
+.lastagent
+**/.claude/settings.local.json
