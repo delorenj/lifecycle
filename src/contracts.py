@@ -2,7 +2,7 @@
 
 Bloodbank remains the schema owner.  This module implements the narrow runtime
 consumer/producer surface locked to Bloodbank commit
-``9b99939ce584b3569f28609f04b1847984381b16``.  Contract drift is checked by
+``48031ee39c238b9d4715b81b74076635235f96d5``.  Contract drift is checked by
 ``scripts/verify_bloodbank_contracts.py`` and all produced envelopes are tested
 with Bloodbank's canonical validator.
 """
@@ -26,7 +26,7 @@ from models import (
 from specification import actor_from_wire, capability_context_from_wire
 
 
-BLOODBANK_CONTRACT_COMMIT = "9b99939ce584b3569f28609f04b1847984381b16"
+BLOODBANK_CONTRACT_COMMIT = "48031ee39c238b9d4715b81b74076635235f96d5"
 COMMAND_TYPE = "bloodbank.v1.lifecycle.intent.submit"
 COMMAND_SUBJECT = "bloodbank.cmd.v1.lifecycle.intent.submit"
 REPLY_SUBJECT = "bloodbank.rpy.v1.lifecycle.intent.submit"
@@ -525,6 +525,17 @@ def validate_obligation_evidence_submitted(envelope: Any) -> Observation:
         raise ContractError(
             "COMPLETION_TIME_MISMATCH",
             "CloudEvent time must equal data.completed_at",
+        )
+    if value["causationid"] != data["invocation_id"]:
+        raise ContractError(
+            "CAUSATION_ID_MISMATCH",
+            "causationid must equal data.invocation_id",
+        )
+    expected_ordering_key = f"lifecycle:{lifecycle_id}"
+    if value["ordering_key"] != expected_ordering_key:
+        raise ContractError(
+            "ORDERING_KEY_MISMATCH",
+            f"ordering_key must equal {expected_ordering_key!r}",
         )
     evidence = _required_object(data.get("evidence"), "data.evidence")
     _exact_keys(

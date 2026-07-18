@@ -1,8 +1,8 @@
 {
-  "bloodbank_commit": "9b99939ce584b3569f28609f04b1847984381b16",
+  "bloodbank_commit": "48031ee39c238b9d4715b81b74076635235f96d5",
   "files": {
     "compose/nats/streams.json": "9fb13b307d5f9126dce9a828e425dea30a68dd4f151621221213ce070fa7d4e6",
-    "docs/lifecycle-contracts.md": "18b6de9e4bda75fb45e66e45ff88d6fb189df966c9fdfdf35252a92c499b0046",
+    "docs/lifecycle-contracts.md": "0f0a07e1900a429c7d1c1006b38b27b1a77905ea09ca8d195cae90f1202cd307",
     "schemas/_common/cloudevent_base.v1.json": "894c1249d267d82de4c53e9988db1827ee4644ffa1c950c414b44654646afa4b",
     "schemas/_common/lifecycle_contracts.v1.json": "05edec5b90795c5dffd2cfd196e2ffb7c6c6cc5e2cddbc567af99124882d5242",
     "schemas/_common/lifecycle_contracts.v2.json": "157fc9b9fdb6d995a07f6182aa2d53cb5c40b585327154e9a0ce7e10b854019e",

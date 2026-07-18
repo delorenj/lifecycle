@@ -270,6 +270,14 @@ def _row_result(row: Mapping[str, Any]) -> CommandResult:
     )
 
 
+def _trusted_publication_time(value: datetime) -> datetime:
+    """Normalize an explicitly trusted broker/direct-ingestion timestamp."""
+
+    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("trusted publication time must be a timezone-aware datetime")
+    return value.astimezone(UTC)
+
+
 def _project_command_state(
     *,
     bundle: AuthorityBundle,
@@ -672,6 +680,7 @@ class LifecycleAuthority:
     ) -> bool:
         """Losslessly persist one bound canonical source event and enqueue replay."""
 
+        received_at = _trusted_publication_time(received_at)
         repo = str(envelope.get("data", {}).get("repo", "")) if isinstance(envelope, dict) else ""
         async with self.repository.pool.acquire() as connection:
             async with connection.transaction():
@@ -701,6 +710,7 @@ class LifecycleAuthority:
     ) -> bool:
         """Persist exact completion evidence as input for authority evaluation."""
 
+        received_at = _trusted_publication_time(received_at)
         observation = validate_obligation_evidence_submitted(envelope)
         repo = str(observation.payload["repo"])
         async with self.repository.pool.acquire() as connection:

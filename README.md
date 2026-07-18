@@ -62,9 +62,11 @@ forward migrations are current.
   `activated_at` that persist across reconcile sweeps and restarts. Invocation
   or review-request facts never satisfy it. Only canonical Bloodbank v2
   completion evidence for that exact active occurrence, observed no earlier
-  than activation and carrying the exact skill, target actor, completion
-  artifact, and authoritative Momo provenance can do so. Evidence for a prior
-  occurrence cannot be reused after a later entry into WAITING.
+  than activation and no later than its trusted JetStream storage timestamp,
+  while carrying the exact invocation causation, lifecycle ordering key, skill,
+  target actor, completion artifact, and authoritative Momo provenance can do
+  so. Evidence stored before activation or for a prior occurrence cannot be
+  reused after a later entry into WAITING, even when durable replay is delayed.
 - Authority snapshots use the versioned Bloodbank v3 snapshot contract and
   publish each grant's authority-owned `capability_version`; clients must carry
   that projected value and obligation occurrence back unchanged rather than

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -76,6 +77,44 @@ class _FakePool:
         self.fetch_sql = sql
         self.fetch_args = args
         return []
+
+
+@pytest.mark.asyncio
+async def test_evidence_without_jetstream_publication_metadata_is_retried() -> None:
+    class MissingMetadataMessage:
+        data = b"{}"
+
+        def __init__(self) -> None:
+            self.nak_delays: list[int] = []
+            self.terminated = False
+
+        @property
+        def metadata(self):
+            raise RuntimeError("not a JetStream message")
+
+        async def nak(self, *, delay: int) -> None:
+            self.nak_delays.append(delay)
+
+        async def term(self) -> None:
+            self.terminated = True
+
+    class AuthorityMustNotRun:
+        async def ingest_obligation_evidence_envelope(self, *args, **kwargs):
+            raise AssertionError("authority must not ingest untrusted evidence")
+
+    message = MissingMetadataMessage()
+    transport = SimpleNamespace(metrics=RuntimeMetrics())
+    runtime = JetStreamRuntime(
+        repository=SimpleNamespace(),
+        authority=AuthorityMustNotRun(),
+        transport=transport,
+    )
+
+    await runtime.handle_evidence_message(message)
+
+    assert message.nak_delays == [1]
+    assert message.terminated is False
+    assert transport.metrics.counters == {"evidence_retry": 1}
 
 
 @pytest.mark.asyncio

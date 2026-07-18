@@ -33,6 +33,29 @@ OBSERVATION_SUBJECT = "bloodbank.evt.v1.repo.task.recorded"
 EVIDENCE_SUBJECT = "bloodbank.evt.v1.lifecycle.obligation_evidence.submitted"
 
 
+def _trusted_publication_time(message: Msg, *, expected_stream: str) -> datetime:
+    """Return the immutable JetStream storage timestamp for a durable message.
+
+    A local consumer clock is not evidence of when a replayed event entered the
+    canonical stream. Missing or inconsistent JetStream metadata is therefore
+    an operational retry condition rather than a poison-message verdict.
+    """
+
+    metadata = message.metadata
+    if metadata.stream != expected_stream:
+        raise RuntimeError(
+            f"JetStream metadata stream {metadata.stream!r} does not equal {expected_stream!r}"
+        )
+    published_at = metadata.timestamp
+    if (
+        not isinstance(published_at, datetime)
+        or published_at.tzinfo is None
+        or published_at.utcoffset() is None
+    ):
+        raise RuntimeError("JetStream metadata is missing a trusted publication timestamp")
+    return published_at.astimezone(UTC)
+
+
 @dataclass
 class RuntimeMetrics:
     counters: dict[str, int] = field(default_factory=dict)
@@ -223,13 +246,11 @@ class JetStreamRuntime:
         repository: LifecycleRepository,
         authority: LifecycleAuthority,
         transport: BloodbankTransport,
-        clock: Callable[[], datetime] | None = None,
         worker_id: str | None = None,
     ) -> None:
         self.repository = repository
         self.authority = authority
         self.transport = transport
-        self.clock = clock or (lambda: datetime.now(UTC))
         self.worker_id = worker_id or f"outbox-{uuid.uuid4().hex[:12]}"
 
     async def handle_command_message(self, message: Msg) -> None:
@@ -252,7 +273,10 @@ class JetStreamRuntime:
             envelope = json.loads(message.data)
             inserted = await self.authority.ingest_repo_task_envelope(
                 envelope,
-                received_at=self.clock(),
+                received_at=_trusted_publication_time(
+                    message,
+                    expected_stream=EVENT_STREAM,
+                ),
             )
             await message.ack_sync()
             self.transport.metrics.increment(
@@ -272,7 +296,10 @@ class JetStreamRuntime:
             envelope = json.loads(message.data)
             inserted = await self.authority.ingest_obligation_evidence_envelope(
                 envelope,
-                received_at=self.clock(),
+                received_at=_trusted_publication_time(
+                    message,
+                    expected_stream=EVENT_STREAM,
+                ),
             )
             await message.ack_sync()
             self.transport.metrics.increment(

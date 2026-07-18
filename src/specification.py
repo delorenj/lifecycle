@@ -335,8 +335,10 @@ def _is_canonical_completion_evidence(
         return False
     return (
         observation.observed_at is not None
+        and observation.received_at is not None
         and completed_at == observation.observed_at
         and completed_at >= occurrence.activated_at
+        and completed_at <= observation.received_at
     )
 
 

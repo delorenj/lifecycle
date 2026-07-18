@@ -43,14 +43,25 @@ consumed. It is rejected unless it carries exact Momo source/producer identity,
 the active `obligation_instance_id`, obligation and skill identity, target actor,
 completion time, and a completed artifact. The occurrence identity and
 `activated_at` are authority state persisted in the obligation projection.
-Evidence observed before activation or for a prior occurrence remains auditable
-input but cannot satisfy the current occurrence. An invocation request or
-review-request event is not completion evidence.
+The durable consumer persists JetStream's immutable publication timestamp, not
+its local receipt clock, and requires
+`activated_at <= completed_at <= trusted_publication_time`. Missing broker
+metadata is retryable. Evidence published before activation, for a prior
+occurrence, or with a claimed completion after its trusted publication remains
+persisted authority input but cannot satisfy the current occurrence. An
+envelope whose causation ID is not its invocation ID, or whose ordering key is
+not `lifecycle:<lifecycle_id>`, is rejected before authority ingestion. An
+invocation request or review-request event is not completion evidence.
 
 Migration `0004_obligation_occurrence_projection.sql` upgrades an already-
 persisted current occurrence from its state-history decision time. It fails
 closed if that activation time or existing occurrence metadata is malformed;
 it never substitutes a later reconcile-sweep timestamp.
+Forward migration `0005_correct_obligation_occurrence_activation.sql` repairs
+installs where a same-status state update caused 0004 to select a later history
+row. It derives the first row in the trailing continuous run of the current
+status, preserves the occurrence ID, and queues an authority reconcile to
+repair the fingerprint, version, history, and publication deterministically.
 
 ## Concurrency and replay
 

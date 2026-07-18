@@ -12,7 +12,7 @@ import pytest
 
 from authority import LifecycleAuthority
 from bloodbank import BloodbankTransport, JetStreamRuntime
-from contracts import canonical_json
+from contracts import canonical_json, parse_timestamp
 from db.repository import LifecycleRepository
 from models import CapabilityGrant, CommandVerdict
 from specification import CAPABILITY_ACTION, default_spec
@@ -88,6 +88,17 @@ async def _fetch_for_lifecycle(subscription, lifecycle_id: str):
     raise AssertionError(f"consumer did not reach lifecycle {lifecycle_id}")
 
 
+async def _claim_for_lifecycle(resources, repository, lifecycle_id: str, worker_id: str):
+    await resources.pool.execute(
+        "UPDATE lifecycle_reconcile_queue SET priority = 100000 WHERE lifecycle_id = $1",
+        lifecycle_id,
+    )
+    claimed = await repository.claim_next_reconcile_job_record(worker_id)
+    assert claimed is not None
+    assert claimed[0] == lifecycle_id
+    return claimed
+
+
 async def _capture_for_lifecycle(resources, lifecycle_id: str, suffix: str):
     capture_nc = await nats.connect(resources.stack.nats_url)
     capture_js = capture_nc.jetstream()
@@ -144,7 +155,6 @@ async def test_real_canonical_observation_command_reply_and_outbox_flow(
         repository=repository,
         authority=authority,
         transport=transport,
-        clock=lambda: NOW + timedelta(seconds=2),
         worker_id=f"publisher-{suffix}",
     )
     try:
@@ -282,6 +292,40 @@ async def test_nats_obligation_occurrence_rejects_old_evidence_then_unlocks(
         worker_id=f"occurrence-{suffix}",
     )
     try:
+        initial = await repository.get_lifecycle_state(lifecycle_id)
+        assert initial is not None
+        occurrence_id = str(
+            uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                "lifecycle-obligation-occurrence:"
+                f"{lifecycle_id}:independent-review:waiting:{initial.state_version + 1}",
+            )
+        )
+        claimed_completion = datetime.now(timezone.utc) + timedelta(seconds=1.5)
+        prepublished = obligation_evidence_envelope(
+            suffix=f"{suffix}-prepublished",
+            completed_at=claimed_completion,
+            lifecycle_id=lifecycle_id,
+            repo=repo_name,
+            obligation_instance_id=occurrence_id,
+        )
+        claimed_completion = parse_timestamp(prepublished["time"], "time")
+        validate_with_bloodbank(prepublished)
+        await integration_resources.js.publish(
+            prepublished["subject"],
+            canonical_json(prepublished).encode(),
+            headers={"Nats-Msg-Id": prepublished["id"]},
+        )
+        prepublished_message = await _fetch_for_lifecycle(
+            transport.evidence_subscription,
+            lifecycle_id,
+        )
+        trusted_publication = prepublished_message.metadata.timestamp
+        activation = trusted_publication + timedelta(seconds=0.5)
+        activation = activation.replace(microsecond=(activation.microsecond // 1000) * 1000)
+        assert trusted_publication < activation < claimed_completion
+        await runtime.handle_evidence_message(prepublished_message)
+
         command = command_envelope(
             suffix=f"{suffix}-waiting",
             lifecycle_id=lifecycle_id,
@@ -289,7 +333,7 @@ async def test_nats_obligation_occurrence_rejects_old_evidence_then_unlocks(
             actor_id=actor_id,
             capability_id=capability_id,
             target="waiting",
-            requested_at=NOW + timedelta(seconds=2),
+            requested_at=activation,
         )
         await integration_resources.js.publish(
             command["subject"],
@@ -300,32 +344,53 @@ async def test_nats_obligation_occurrence_rejects_old_evidence_then_unlocks(
         await runtime.handle_command_message(message)
         waiting = await repository.get_lifecycle_state(lifecycle_id)
         assert waiting is not None
-        occurrence_id = waiting.obligations[0].obligation_instance_id
+        assert waiting.obligations[0].obligation_instance_id == occurrence_id
+        assert waiting.obligations[0].activated_at == activation
+        assert waiting.obligations[0].status.value == "pending"
+
+        claimed = await _claim_for_lifecycle(
+            integration_resources,
+            repository,
+            lifecycle_id,
+            f"occurrence-{suffix}-prepublished",
+        )
+        assert claimed == (lifecycle_id, claimed_completion)
+        assert await authority.reconcile_claimed(
+            lifecycle_id=lifecycle_id,
+            as_of=claimed[1],
+            worker_id=f"occurrence-{suffix}-prepublished",
+        )
+        after_replay = await repository.get_lifecycle_state(lifecycle_id)
+        assert after_replay is not None
+        assert after_replay.status.value == "waiting"
+        assert after_replay.obligations[0].status.value == "pending"
+        persisted_publication = await integration_resources.pool.fetchval(
+            "SELECT received_at FROM lifecycle_observations WHERE source_event_id = $1",
+            uuid.UUID(prepublished["id"]),
+        )
+        assert persisted_publication == trusted_publication
+
+        delay = (activation - datetime.now(timezone.utc)).total_seconds()
+        if delay > 0:
+            await asyncio.sleep(delay + 0.05)
 
         evidence_cases = (
             obligation_evidence_envelope(
-                suffix=f"{suffix}-preactivation",
-                completed_at=NOW + timedelta(seconds=1),
-                lifecycle_id=lifecycle_id,
-                repo=repo_name,
-                obligation_instance_id=occurrence_id,
-            ),
-            obligation_evidence_envelope(
                 suffix=f"{suffix}-prior",
-                completed_at=NOW + timedelta(seconds=3),
+                completed_at=datetime.now(timezone.utc),
                 lifecycle_id=lifecycle_id,
                 repo=repo_name,
                 obligation_instance_id="00000000-0000-4000-8000-000000000099",
             ),
             obligation_evidence_envelope(
                 suffix=f"{suffix}-valid",
-                completed_at=NOW + timedelta(seconds=4),
+                completed_at=datetime.now(timezone.utc),
                 lifecycle_id=lifecycle_id,
                 repo=repo_name,
                 obligation_instance_id=occurrence_id,
             ),
         )
-        expected_statuses = ("waiting", "waiting", "active")
+        expected_statuses = ("waiting", "active")
         for index, (evidence, expected_status) in enumerate(
             zip(evidence_cases, expected_statuses, strict=True),
             start=1,
@@ -338,8 +403,11 @@ async def test_nats_obligation_occurrence_rejects_old_evidence_then_unlocks(
             )
             message = await _fetch_for_lifecycle(transport.evidence_subscription, lifecycle_id)
             await runtime.handle_evidence_message(message)
-            claimed = await repository.claim_next_reconcile_job_record(
-                f"occurrence-{suffix}-{index}"
+            claimed = await _claim_for_lifecycle(
+                integration_resources,
+                repository,
+                lifecycle_id,
+                f"occurrence-{suffix}-{index}",
             )
             assert claimed is not None
             assert await authority.reconcile_claimed(

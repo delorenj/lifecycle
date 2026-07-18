@@ -788,6 +788,29 @@ async def test_obligation_occurrence_rejects_history_and_survives_restart_cycle(
     first_occurrence = waiting.obligations[0]
     assert first_occurrence.activated_at == NOW + timedelta(seconds=1)
 
+    prepublished_future_claim = obligation_evidence_envelope(
+        suffix=f"{suffix}-prepublished-future-claim",
+        completed_at=NOW + timedelta(seconds=2),
+        lifecycle_id=lifecycle_id,
+        repo=repo_name,
+        obligation_instance_id=first_occurrence.obligation_instance_id,
+    )
+    assert await authority.ingest_obligation_evidence_envelope(
+        prepublished_future_claim,
+        received_at=NOW + timedelta(milliseconds=500),
+    )
+    claimed = await repository.claim_next_reconcile_job_record(f"prepublished-{suffix}")
+    assert claimed == (lifecycle_id, NOW + timedelta(seconds=2))
+    assert await authority.reconcile_claimed(
+        lifecycle_id=lifecycle_id,
+        as_of=claimed[1],
+        worker_id=f"prepublished-{suffix}",
+    )
+    after_prepublished = await repository.get_lifecycle_state(lifecycle_id)
+    assert after_prepublished is not None
+    assert after_prepublished.status.value == "waiting"
+    assert after_prepublished.obligations[0].status.value == "pending"
+
     preactivation = obligation_evidence_envelope(
         suffix=f"{suffix}-preactivation",
         completed_at=NOW,
@@ -800,7 +823,7 @@ async def test_obligation_occurrence_rejects_history_and_survives_restart_cycle(
         received_at=NOW + timedelta(seconds=2),
     )
     claimed = await repository.claim_next_reconcile_job_record(f"pre-{suffix}")
-    assert claimed == (lifecycle_id, NOW + timedelta(seconds=1))
+    assert claimed == (lifecycle_id, NOW + timedelta(seconds=2))
     assert await authority.reconcile_claimed(
         lifecycle_id=lifecycle_id,
         as_of=claimed[1],
@@ -959,11 +982,49 @@ async def test_obligation_occurrence_migration_uses_persisted_activation_history
     )
     before = await repository.get_lifecycle_state(lifecycle_id)
     assert before is not None
+    first_occurrence_id = before.obligations[0].obligation_instance_id
+    mode_result = await authority.handle_command_envelope(
+        command_envelope(
+            suffix=f"{suffix}-same-status-mode",
+            lifecycle_id=lifecycle_id,
+            repo=repo_name,
+            expected_state_version=before.state_version,
+            actor_id=actor_id,
+            capability_id=capability_id,
+            intent_name="set_mode",
+            target="autonomous",
+            requested_at=NOW + timedelta(seconds=3),
+        )
+    )
+    assert mode_result.result.verdict == CommandVerdict.APPLIED
+    same_status = await repository.get_lifecycle_state(lifecycle_id)
+    assert same_status is not None
+    assert same_status.status.value == "waiting"
+    assert same_status.state_version == before.state_version + 1
+
+    evidence_between_versions = obligation_evidence_envelope(
+        suffix=f"{suffix}-between-v2-v3",
+        completed_at=NOW + timedelta(seconds=2),
+        lifecycle_id=lifecycle_id,
+        repo=repo_name,
+        obligation_instance_id=first_occurrence_id,
+    )
+    assert await authority.ingest_obligation_evidence_envelope(
+        evidence_between_versions,
+        received_at=NOW + timedelta(seconds=2),
+    )
     await integration_resources.pool.execute(
         """
         UPDATE lifecycle_state
         SET obligations = (
-            SELECT jsonb_agg(item - 'obligation_instance_id' - 'activated_at')
+            SELECT jsonb_agg(
+                jsonb_set(
+                    item,
+                    '{activated_at}',
+                    to_jsonb(TIMESTAMPTZ '2026-07-18 17:00:03+00'),
+                    false
+                )
+            )
             FROM jsonb_array_elements(obligations) AS item
         )
         WHERE lifecycle_id = $1
@@ -971,7 +1032,7 @@ async def test_obligation_occurrence_migration_uses_persisted_activation_history
         lifecycle_id,
     )
     await integration_resources.pool.execute(
-        "DELETE FROM lifecycle_schema_migrations WHERE version = '0004'"
+        "DELETE FROM lifecycle_schema_migrations WHERE version = '0005'"
     )
 
     status = await apply_migrations(integration_resources.pool)
@@ -979,7 +1040,42 @@ async def test_obligation_occurrence_migration_uses_persisted_activation_history
     migrated = await repository.get_lifecycle_state(lifecycle_id)
     assert migrated is not None
     assert migrated.obligations[0].activated_at == before.last_reconciled_at
-    assert uuid.UUID(migrated.obligations[0].obligation_instance_id).version == 5
+    assert migrated.obligations[0].obligation_instance_id == first_occurrence_id
+    await integration_resources.pool.execute(
+        "UPDATE lifecycle_reconcile_queue SET priority = 100000 WHERE lifecycle_id = $1",
+        lifecycle_id,
+    )
+    claimed = await repository.claim_next_reconcile_job_record(f"migration-{suffix}")
+    assert claimed == (lifecycle_id, same_status.last_reconciled_at)
+    assert await authority.reconcile_claimed(
+        lifecycle_id=lifecycle_id,
+        as_of=claimed[1],
+        worker_id=f"migration-{suffix}",
+    )
+    unlocked = await repository.get_lifecycle_state(lifecycle_id)
+    assert unlocked is not None
+    assert unlocked.status.value == "active"
+    assert unlocked.state_version == same_status.state_version + 1
+    repeated_result = await authority.handle_command_envelope(
+        command_envelope(
+            suffix=f"{suffix}-repeated-waiting",
+            lifecycle_id=lifecycle_id,
+            repo=repo_name,
+            expected_state_version=unlocked.state_version,
+            actor_id=actor_id,
+            capability_id=capability_id,
+            target="waiting",
+            requested_at=NOW + timedelta(seconds=4),
+        )
+    )
+    assert repeated_result.result.verdict == CommandVerdict.APPLIED
+    repeated = await repository.get_lifecycle_state(lifecycle_id)
+    assert repeated is not None
+    assert repeated.obligations[0].obligation_instance_id != first_occurrence_id
+    restarted = await LifecycleRepository(integration_resources.pool).get_lifecycle_state(
+        lifecycle_id
+    )
+    assert restarted == repeated
     assert (await apply_migrations(integration_resources.pool)).current is True
 
 

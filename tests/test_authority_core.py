@@ -272,6 +272,7 @@ def test_only_exact_completion_evidence_satisfies_and_unlocks_progression() -> N
     )
     validate_with_bloodbank(evidence_wire)
     evidence = validate_obligation_evidence_submitted(evidence_wire)
+    evidence.received_at = NOW + timedelta(seconds=1)
     obligations = compute_obligations(
         previous,
         spec,
@@ -352,6 +353,8 @@ def test_obligation_occurrence_rejects_preactivation_and_prior_instance_evidence
             obligation_instance_id="00000000-0000-4000-8000-000000000099",
         )
     )
+    preactivation.received_at = NOW
+    prior_occurrence.received_at = activation + timedelta(seconds=1)
 
     for evidence in (preactivation, prior_occurrence):
         evaluated = compute_obligations(
@@ -424,6 +427,7 @@ def test_completion_evidence_rejects_noncompletion_and_cannot_match_wrong_actor(
         assert raised.value.reason_code == reason
         return
     observation = validate_obligation_evidence_submitted(envelope)
+    observation.received_at = NOW
     state = LifecycleState(
         lifecycle_id="lc_test",
         status=LifecycleStatus.WAITING,
@@ -433,6 +437,79 @@ def test_completion_evidence_rejects_noncompletion_and_cannot_match_wrong_actor(
         compute_obligations(state, default_spec("lc_test"), [observation], NOW)[0].status
         == ObligationStatus.PENDING
     )
+
+
+def test_completion_evidence_requires_trusted_publication_after_activation_and_completion() -> None:
+    spec = default_spec("lc_test")
+    activation = NOW + timedelta(minutes=5)
+    state = LifecycleState(
+        lifecycle_id="lc_test",
+        status=LifecycleStatus.WAITING,
+        health=LifecycleHealth.NOMINAL,
+        state_version=12,
+    )
+    state.obligations = compute_obligations(state, spec, [], activation)
+    occurrence = state.obligations[0]
+    completed_at = activation + timedelta(seconds=5)
+
+    replayed = validate_obligation_evidence_submitted(
+        obligation_evidence_envelope(
+            suffix="published-before-activation",
+            completed_at=completed_at,
+            obligation_instance_id=occurrence.obligation_instance_id,
+        )
+    )
+    replayed.received_at = activation - timedelta(minutes=1)
+    assert (
+        compute_obligations(state, spec, [replayed], completed_at)[0].status
+        == ObligationStatus.PENDING
+    )
+
+    published_before_completion = validate_obligation_evidence_submitted(
+        obligation_evidence_envelope(
+            suffix="published-before-completion",
+            completed_at=completed_at,
+            obligation_instance_id=occurrence.obligation_instance_id,
+        )
+    )
+    published_before_completion.received_at = completed_at - timedelta(microseconds=1)
+    assert (
+        compute_obligations(state, spec, [published_before_completion], completed_at)[0].status
+        == ObligationStatus.PENDING
+    )
+
+    valid = validate_obligation_evidence_submitted(
+        obligation_evidence_envelope(
+            suffix="published-after-completion",
+            completed_at=completed_at,
+            obligation_instance_id=occurrence.obligation_instance_id,
+        )
+    )
+    valid.received_at = completed_at
+    assert (
+        compute_obligations(state, spec, [valid], completed_at)[0].status
+        == ObligationStatus.SATISFIED
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "reason"),
+    [
+        ("causationid", "00000000-0000-4000-8000-000000000099", "CAUSATION_ID_MISMATCH"),
+        ("ordering_key", "lifecycle:lc_other", "ORDERING_KEY_MISMATCH"),
+    ],
+)
+def test_completion_evidence_binds_invocation_causation_and_lifecycle_ordering(
+    field: str,
+    value: str,
+    reason: str,
+) -> None:
+    envelope = obligation_evidence_envelope(suffix=f"identity-{field}", completed_at=NOW)
+    envelope[field] = value
+
+    with pytest.raises(ContractError) as raised:
+        validate_obligation_evidence_submitted(envelope)
+    assert raised.value.reason_code == reason
 
 
 def test_command_contract_and_kind_correct_reply_verdicts() -> None:
