@@ -18,6 +18,13 @@ import pytest_asyncio
 from db.migrations import apply_migrations
 
 
+_TRANSIENT_POSTGRES_CONNECTION_ERRORS = (
+    OSError,
+    asyncpg.CannotConnectNowError,
+    asyncpg.PostgresConnectionError,
+)
+
+
 @dataclass(frozen=True)
 class DockerStack:
     suffix: str
@@ -98,6 +105,26 @@ def _wait_postgres(container: str, timeout: float = 30) -> None:
     raise TimeoutError("isolated PostgreSQL did not become ready")
 
 
+async def _create_pool_with_retry(
+    database_url: str,
+    *,
+    timeout: float = 30,
+) -> asyncpg.Pool:
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            return await asyncpg.create_pool(
+                database_url,
+                min_size=1,
+                max_size=8,
+            )
+        except _TRANSIENT_POSTGRES_CONNECTION_ERRORS:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise
+            await asyncio.sleep(min(0.2, remaining))
+
+
 @pytest.fixture(scope="session")
 def docker_stack() -> DockerStack:
     if os.getenv("LIFECYCLE_RUN_INTEGRATION") != "1":
@@ -174,19 +201,7 @@ def docker_stack() -> DockerStack:
 async def integration_resources(
     docker_stack: DockerStack,
 ) -> IntegrationResources:
-    deadline = time.monotonic() + 30
-    while True:
-        try:
-            pool = await asyncpg.create_pool(
-                docker_stack.database_url,
-                min_size=1,
-                max_size=8,
-            )
-            break
-        except (ConnectionError, OSError):
-            if time.monotonic() >= deadline:
-                raise
-            await asyncio.sleep(0.2)
+    pool = await _create_pool_with_retry(docker_stack.database_url)
     await apply_migrations(pool)
     nc = await nats.connect(docker_stack.nats_url)
     js = nc.jetstream()

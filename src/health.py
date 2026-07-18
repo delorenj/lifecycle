@@ -43,20 +43,21 @@ class HealthApplication:
                 "applied": migrations.applied,
                 "available": migrations.available,
             }
+            checks["outbox_pending"] = (
+                await self.repository.outbox_pending_count()
+                if checks["database"] == "ready"
+                else None
+            )
         except Exception as exc:
             checks["database"] = f"failed:{type(exc).__name__}"
             checks["migrations"] = {"status": "unavailable"}
+            checks["outbox_pending"] = None
         nats_ready, nats_reason = await self.transport.ready()
         checks["bloodbank"] = nats_reason
         ready = (
             checks.get("database") == "ready"
             and checks.get("migrations", {}).get("status") == "current"
             and nats_ready
-        )
-        checks["outbox_pending"] = (
-            await self.repository.outbox_pending_count()
-            if checks.get("database") == "ready"
-            else None
         )
         return web.json_response(
             {"status": "ready" if ready else "not_ready", "checks": checks},

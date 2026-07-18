@@ -56,6 +56,8 @@ forward migrations are current.
   key, payload, and payload hash are preserved without interpreting provider
   columns as lifecycle truth.
 - NATS acknowledgement happens after PostgreSQL commit. Publisher failure never
+  rolls back committed authority state, append-only history, idempotency records,
+  or outbox envelopes.
 - Bloodbank delivery is at-least-once. Stable CloudEvent IDs, command identity,
   observation identity, and the append-only idempotency ledger make redelivery
   safe without claiming exactly-once transport.
