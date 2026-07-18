@@ -263,9 +263,12 @@ def test_only_exact_completion_evidence_satisfies_and_unlocks_progression() -> N
         state_version=4,
         last_reconciled_at=NOW,
     )
+    previous.obligations = compute_obligations(previous, spec, [], NOW)
+    occurrence = previous.obligations[0]
     evidence_wire = obligation_evidence_envelope(
         suffix="complete",
         completed_at=NOW + timedelta(seconds=1),
+        obligation_instance_id=occurrence.obligation_instance_id,
     )
     validate_with_bloodbank(evidence_wire)
     evidence = validate_obligation_evidence_submitted(evidence_wire)
@@ -321,6 +324,80 @@ def test_only_exact_completion_evidence_satisfies_and_unlocks_progression() -> N
     )
     assert held.current_state.status == LifecycleStatus.WAITING
     assert held.current_state.obligations[0].status == ObligationStatus.PENDING
+
+
+def test_obligation_occurrence_rejects_preactivation_and_prior_instance_evidence() -> None:
+    spec = default_spec("lc_test")
+    state = LifecycleState(
+        lifecycle_id="lc_test",
+        status=LifecycleStatus.WAITING,
+        health=LifecycleHealth.NOMINAL,
+        state_version=8,
+    )
+    activation = NOW + timedelta(minutes=5)
+    state.obligations = compute_obligations(state, spec, [], activation)
+    occurrence = state.obligations[0]
+
+    preactivation = validate_obligation_evidence_submitted(
+        obligation_evidence_envelope(
+            suffix="preactivation",
+            completed_at=NOW,
+            obligation_instance_id=occurrence.obligation_instance_id,
+        )
+    )
+    prior_occurrence = validate_obligation_evidence_submitted(
+        obligation_evidence_envelope(
+            suffix="prior-occurrence",
+            completed_at=activation + timedelta(seconds=1),
+            obligation_instance_id="00000000-0000-4000-8000-000000000099",
+        )
+    )
+
+    for evidence in (preactivation, prior_occurrence):
+        evaluated = compute_obligations(
+            state,
+            spec,
+            [evidence],
+            activation + timedelta(seconds=1),
+        )
+        assert evaluated[0].status == ObligationStatus.PENDING
+        assert evaluated[0].obligation_instance_id == occurrence.obligation_instance_id
+        assert evaluated[0].activated_at == activation
+
+
+def test_obligation_occurrence_is_stable_and_changes_on_repeated_waiting_cycle() -> None:
+    spec = default_spec("lc_test")
+    first_state = LifecycleState(
+        lifecycle_id="lc_test",
+        status=LifecycleStatus.WAITING,
+        health=LifecycleHealth.NOMINAL,
+        state_version=4,
+    )
+    first = compute_obligations(first_state, spec, [], NOW)
+    first_state.obligations = first
+    replay = compute_obligations(
+        first_state,
+        spec,
+        [],
+        NOW + timedelta(hours=1),
+    )
+    repeated_state = LifecycleState(
+        lifecycle_id="lc_test",
+        status=LifecycleStatus.WAITING,
+        health=LifecycleHealth.NOMINAL,
+        state_version=8,
+    )
+    repeated = compute_obligations(
+        repeated_state,
+        spec,
+        [],
+        NOW + timedelta(hours=2),
+    )
+
+    assert replay[0].obligation_instance_id == first[0].obligation_instance_id
+    assert replay[0].activated_at == first[0].activated_at == NOW
+    assert repeated[0].obligation_instance_id != first[0].obligation_instance_id
+    assert repeated[0].activated_at == NOW + timedelta(hours=2)
 
 
 @pytest.mark.parametrize(

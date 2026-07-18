@@ -167,7 +167,7 @@ def _snapshot_data(
     publication: dict[str, Any],
 ) -> dict[str, Any]:
     return {
-        "contract_version": 2,
+        "contract_version": 3,
         "lifecycle_id": bundle.lifecycle_id,
         "repo": bundle.repo,
         "spec_version": current_state.spec_version,
@@ -903,7 +903,7 @@ class LifecycleAuthority:
             correlation_id=correlation_id,
             causation_id=causation_id,
             authority_instance=self.authority_instance,
-            schema_version=2,
+            schema_version=3,
         )
         await self.repository.insert_reserved_outbox_tx(
             connection,

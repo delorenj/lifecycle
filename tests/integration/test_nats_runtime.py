@@ -77,6 +77,17 @@ async def _delete_test_consumers(resources, suffix: str) -> None:
             pass
 
 
+async def _fetch_for_lifecycle(subscription, lifecycle_id: str):
+    for _ in range(100):
+        messages = await subscription.fetch(batch=1, timeout=2)
+        message = messages[0]
+        envelope = json.loads(message.data)
+        if envelope.get("data", {}).get("lifecycle_id") == lifecycle_id:
+            return message
+        await message.ack_sync()
+    raise AssertionError(f"consumer did not reach lifecycle {lifecycle_id}")
+
+
 async def _capture_for_lifecycle(resources, lifecycle_id: str, suffix: str):
     capture_nc = await nats.connect(resources.stack.nats_url)
     capture_js = capture_nc.jetstream()
@@ -188,6 +199,7 @@ async def test_real_canonical_observation_command_reply_and_outbox_flow(
             completed_at=NOW + timedelta(seconds=4),
             lifecycle_id=lifecycle_id,
             repo=repo_name,
+            obligation_instance_id=state.obligations[0].obligation_instance_id,
         )
         await integration_resources.js.publish(
             evidence["subject"],
@@ -231,8 +243,8 @@ async def test_real_canonical_observation_command_reply_and_outbox_flow(
             event for event in events if event["type"] == "bloodbank.v1.lifecycle.snapshot.updated"
         ]
         assert [snapshot["schemaref"] for snapshot in snapshots] == [
-            "bloodbank.v1.lifecycle.snapshot.updated.v2",
-            "bloodbank.v1.lifecycle.snapshot.updated.v2",
+            "bloodbank.v1.lifecycle.snapshot.updated.v3",
+            "bloodbank.v1.lifecycle.snapshot.updated.v3",
         ]
         assert snapshots[0]["data"]["state"]["status"] == "waiting"
         assert snapshots[0]["data"]["obligations"][0]["status"] == "pending"
@@ -247,6 +259,116 @@ async def test_real_canonical_observation_command_reply_and_outbox_flow(
         assert snapshots[0]["data"]["capabilities"][0]["capability_version"] == 1
         assert snapshots[1]["data"]["state"]["status"] == "active"
         for envelope in [observation, command, evidence, *events, *replies]:
+            validate_with_bloodbank(envelope)
+    finally:
+        await transport.close()
+        await _delete_test_consumers(integration_resources, suffix)
+
+
+@pytest.mark.asyncio
+async def test_nats_obligation_occurrence_rejects_old_evidence_then_unlocks(
+    integration_resources,
+) -> None:
+    suffix = uuid.uuid4().hex[:8]
+    repository, lifecycle_id, repo_name, actor_id, capability_id = await _bootstrap(
+        integration_resources, suffix
+    )
+    authority = LifecycleAuthority(repository, authority_instance="nats-occurrence")
+    transport = await _transport(integration_resources, suffix)
+    runtime = JetStreamRuntime(
+        repository=repository,
+        authority=authority,
+        transport=transport,
+        worker_id=f"occurrence-{suffix}",
+    )
+    try:
+        command = command_envelope(
+            suffix=f"{suffix}-waiting",
+            lifecycle_id=lifecycle_id,
+            repo=repo_name,
+            actor_id=actor_id,
+            capability_id=capability_id,
+            target="waiting",
+            requested_at=NOW + timedelta(seconds=2),
+        )
+        await integration_resources.js.publish(
+            command["subject"],
+            canonical_json(command).encode(),
+            headers={"Nats-Msg-Id": command["id"]},
+        )
+        message = await _fetch_for_lifecycle(transport.command_subscription, lifecycle_id)
+        await runtime.handle_command_message(message)
+        waiting = await repository.get_lifecycle_state(lifecycle_id)
+        assert waiting is not None
+        occurrence_id = waiting.obligations[0].obligation_instance_id
+
+        evidence_cases = (
+            obligation_evidence_envelope(
+                suffix=f"{suffix}-preactivation",
+                completed_at=NOW + timedelta(seconds=1),
+                lifecycle_id=lifecycle_id,
+                repo=repo_name,
+                obligation_instance_id=occurrence_id,
+            ),
+            obligation_evidence_envelope(
+                suffix=f"{suffix}-prior",
+                completed_at=NOW + timedelta(seconds=3),
+                lifecycle_id=lifecycle_id,
+                repo=repo_name,
+                obligation_instance_id="00000000-0000-4000-8000-000000000099",
+            ),
+            obligation_evidence_envelope(
+                suffix=f"{suffix}-valid",
+                completed_at=NOW + timedelta(seconds=4),
+                lifecycle_id=lifecycle_id,
+                repo=repo_name,
+                obligation_instance_id=occurrence_id,
+            ),
+        )
+        expected_statuses = ("waiting", "waiting", "active")
+        for index, (evidence, expected_status) in enumerate(
+            zip(evidence_cases, expected_statuses, strict=True),
+            start=1,
+        ):
+            validate_with_bloodbank(evidence)
+            await integration_resources.js.publish(
+                evidence["subject"],
+                canonical_json(evidence).encode(),
+                headers={"Nats-Msg-Id": evidence["id"]},
+            )
+            message = await _fetch_for_lifecycle(transport.evidence_subscription, lifecycle_id)
+            await runtime.handle_evidence_message(message)
+            claimed = await repository.claim_next_reconcile_job_record(
+                f"occurrence-{suffix}-{index}"
+            )
+            assert claimed is not None
+            assert await authority.reconcile_claimed(
+                lifecycle_id=lifecycle_id,
+                as_of=claimed[1],
+                worker_id=f"occurrence-{suffix}-{index}",
+            )
+            state = await repository.get_lifecycle_state(lifecycle_id)
+            assert state is not None
+            assert state.status.value == expected_status
+            if expected_status == "waiting":
+                assert state.obligations[0].status.value == "pending"
+                assert state.obligations[0].obligation_instance_id == occurrence_id
+
+        assert await runtime.publish_outbox_once(batch_size=30) == 11
+        assert await repository.outbox_pending_count() == 0
+        events, replies = await _capture_for_lifecycle(
+            integration_resources,
+            lifecycle_id,
+            suffix,
+        )
+        snapshots = [
+            event for event in events if event["type"] == "bloodbank.v1.lifecycle.snapshot.updated"
+        ]
+        assert len(snapshots) == 4
+        assert all(snapshot["schemaref"].endswith(".v3") for snapshot in snapshots)
+        assert snapshots[0]["data"]["obligations"][0]["obligation_instance_id"] == (occurrence_id)
+        assert len(replies) == 1
+        for envelope in [*events, *replies]:
             validate_with_bloodbank(envelope)
     finally:
         await transport.close()
@@ -312,7 +434,8 @@ async def test_publisher_outage_commit_retry_and_restart_catchup(
         )
         failed_rows = await integration_resources.pool.fetch(
             """
-            SELECT publish_attempts, published_at
+            SELECT id, event_id, event_sequence, event_type, subject,
+                   aggregate_version, publish_attempts, published_at
             FROM lifecycle_event_outbox WHERE lifecycle_id = $1 ORDER BY id
             """,
             lifecycle_id,
@@ -320,6 +443,14 @@ async def test_publisher_outage_commit_retry_and_restart_catchup(
         assert len(failed_rows) == 3
         assert [row["publish_attempts"] for row in failed_rows] == [1, 0, 0]
         assert all(row["published_at"] is None for row in failed_rows)
+        pending_outbox_ids = [row["id"] for row in failed_rows]
+        pending_event_ids = [str(row["event_id"]) for row in failed_rows]
+        pending_sequences = [row["event_sequence"] for row in failed_rows]
+        assert pending_sequences == sorted(pending_sequences)
+        assert pending_sequences == list(
+            range(pending_sequences[0], pending_sequences[0] + len(pending_sequences))
+        )
+        assert [row["aggregate_version"] for row in failed_rows] == [2, 2, 2]
     finally:
         integration_resources.stack.start_nats()
 
@@ -344,6 +475,20 @@ async def test_publisher_outage_commit_retry_and_restart_catchup(
         await asyncio.sleep(1.2)
         assert await restarted_runtime.publish_outbox_once(batch_size=20) == 3
         assert await repository.outbox_pending_count() == 0
+        drained_rows = await integration_resources.pool.fetch(
+            """
+            SELECT id, event_id, event_sequence, published_at
+            FROM lifecycle_event_outbox
+            WHERE lifecycle_id = $1 AND id = ANY($2::bigint[])
+            ORDER BY id
+            """,
+            lifecycle_id,
+            pending_outbox_ids,
+        )
+        assert [row["id"] for row in drained_rows] == pending_outbox_ids
+        assert [str(row["event_id"]) for row in drained_rows] == pending_event_ids
+        assert [row["event_sequence"] for row in drained_rows] == pending_sequences
+        assert all(row["published_at"] is not None for row in drained_rows)
 
         retry = await authority.handle_command_envelope(command)
         assert retry.result.verdict == CommandVerdict.IDEMPOTENT
@@ -378,6 +523,18 @@ async def test_publisher_outage_commit_retry_and_restart_catchup(
             "idempotent",
         ]
         assert len({event["id"] for event in events}) == len(events)
+        observed_ids = {event["id"] for event in events} | {reply["id"] for reply in replies}
+        assert set(pending_event_ids).issubset(observed_ids)
+        authority_sequences = [
+            event["data"]["publication"]["event_sequence"]
+            for event in events
+            if event["type"]
+            in {
+                "bloodbank.v1.lifecycle.snapshot.updated",
+                "bloodbank.v1.lifecycle.status.updated",
+            }
+        ]
+        assert authority_sequences == sorted(authority_sequences)
         for envelope in [*events, *replies]:
             validate_with_bloodbank(envelope)
     finally:

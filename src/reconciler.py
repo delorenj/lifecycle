@@ -393,6 +393,7 @@ def reconcile(
         policy=seed_state.policy,
         spec_version=authority_spec.version,
         mode=seed_state.mode,
+        obligations=list(seed_state.obligations),
     )
     departure_obligations = compute_obligations(
         current_state,

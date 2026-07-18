@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
+import uuid
 
 from models import (
     ActorContext,
@@ -215,31 +216,50 @@ def compute_obligations(
     for rule in sorted(spec.obligation_rules, key=lambda item: item.id):
         if state.status not in rule.when_statuses:
             continue
+        occurrence = existing.get(rule.id)
+        if occurrence is None:
+            occurrence = Obligation(
+                id=rule.id,
+                obligation_instance_id=str(
+                    uuid.uuid5(
+                        uuid.NAMESPACE_URL,
+                        "lifecycle-obligation-occurrence:"
+                        f"{state.lifecycle_id}:{rule.id}:{state.status.value}:"
+                        f"{state.state_version}",
+                    )
+                ),
+                activated_at=as_of,
+                kind=rule.kind,
+                status=ObligationStatus.PENDING,
+                description=rule.description,
+                skill_ref=rule.skill_ref,
+                owner_id=rule.owner_id,
+                due_at=(
+                    as_of + timedelta(seconds=rule.due_after_seconds)
+                    if rule.due_after_seconds is not None
+                    else None
+                ),
+            )
         satisfied = any(
             _is_canonical_completion_evidence(
                 observation,
                 lifecycle_id=state.lifecycle_id,
                 rule=rule,
+                occurrence=occurrence,
             )
             for observation in observations
         )
         obligations.append(
             Obligation(
                 id=rule.id,
+                obligation_instance_id=occurrence.obligation_instance_id,
+                activated_at=occurrence.activated_at,
                 kind=rule.kind,
                 status=(ObligationStatus.SATISFIED if satisfied else ObligationStatus.PENDING),
                 description=rule.description,
                 skill_ref=rule.skill_ref,
                 owner_id=rule.owner_id,
-                due_at=(
-                    existing[rule.id].due_at
-                    if rule.id in existing
-                    else (
-                        as_of + timedelta(seconds=rule.due_after_seconds)
-                        if rule.due_after_seconds is not None
-                        else None
-                    )
-                ),
+                due_at=occurrence.due_at,
                 source_observation_ids=source_ids,
             )
         )
@@ -251,6 +271,7 @@ def _is_canonical_completion_evidence(
     *,
     lifecycle_id: str,
     rule: ObligationRule,
+    occurrence: Obligation,
 ) -> bool:
     """Fail closed unless an observation is exact completed-skill evidence.
 
@@ -276,6 +297,7 @@ def _is_canonical_completion_evidence(
             "lifecycle_id",
             "repo",
             "obligation_id",
+            "obligation_instance_id",
             "obligation_kind",
             "target_actor_id",
             "invocation_id",
@@ -283,9 +305,10 @@ def _is_canonical_completion_evidence(
             "completed_at",
             "evidence",
         }
-        or payload.get("contract_version") != 1
+        or payload.get("contract_version") != 2
         or payload.get("lifecycle_id") != lifecycle_id
         or payload.get("obligation_id") != rule.id
+        or payload.get("obligation_instance_id") != occurrence.obligation_instance_id
         or payload.get("obligation_kind") != rule.kind
         or rule.owner_id is None
         or payload.get("target_actor_id") != rule.owner_id
@@ -310,7 +333,11 @@ def _is_canonical_completion_evidence(
         completed_at = _parse_timestamp(str(payload["completed_at"]))
     except (KeyError, ValueError):
         return False
-    return observation.observed_at is not None and completed_at == observation.observed_at
+    return (
+        observation.observed_at is not None
+        and completed_at == observation.observed_at
+        and completed_at >= occurrence.activated_at
+    )
 
 
 def transition_guard_reason(

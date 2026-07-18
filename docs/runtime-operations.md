@@ -38,11 +38,19 @@ identity required by the reply schema are terminated as poison and counted.
 Transient database/transport failures are negatively acknowledged for durable
 redelivery. Canonical but unbound repository observations are acknowledged and
 ignored because the consumer sees the platform-wide repo task subject.
-Obligation-completion evidence is separately schema validated and durably
+Obligation-completion evidence v2 is separately schema validated and durably
 consumed. It is rejected unless it carries exact Momo source/producer identity,
-obligation and skill identity, target actor, completion time, and a completed
-artifact. An invocation request or review-request event is not completion
-evidence and cannot satisfy an obligation.
+the active `obligation_instance_id`, obligation and skill identity, target actor,
+completion time, and a completed artifact. The occurrence identity and
+`activated_at` are authority state persisted in the obligation projection.
+Evidence observed before activation or for a prior occurrence remains auditable
+input but cannot satisfy the current occurrence. An invocation request or
+review-request event is not completion evidence.
+
+Migration `0004_obligation_occurrence_projection.sql` upgrades an already-
+persisted current occurrence from its state-history decision time. It fails
+closed if that activation time or existing occurrence metadata is malformed;
+it never substitutes a later reconcile-sweep timestamp.
 
 ## Concurrency and replay
 

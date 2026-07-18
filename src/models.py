@@ -229,6 +229,8 @@ class FrontierItem:
 @dataclass(frozen=True)
 class Obligation:
     id: str
+    obligation_instance_id: str
+    activated_at: datetime
     kind: str
     status: ObligationStatus
     description: str
@@ -240,6 +242,8 @@ class Obligation:
     def to_json(self) -> dict[str, Any]:
         return {
             "id": self.id,
+            "obligation_instance_id": self.obligation_instance_id,
+            "activated_at": self.activated_at.isoformat().replace("+00:00", "Z"),
             "kind": self.kind,
             "status": self.status.value,
             "description": self.description,

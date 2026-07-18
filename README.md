@@ -56,14 +56,19 @@ forward migrations are current.
 - Source `bloodbank.v1.repo.task.recorded` identity, time, provenance, ordering
   key, payload, and payload hash are preserved without interpreting provider
   columns as lifecycle truth.
-- A pending obligation is computed before the legal frontier and prevents both
+- A pending obligation occurrence is computed before the legal frontier and prevents both
   automatic and submitted transitions guarded by `no_pending_obligations`.
-  Invocation or review-request facts never satisfy it. Only the canonical
-  Bloodbank completion-evidence event with the exact obligation, skill, target
-  actor, completion artifact, and authoritative Momo provenance can do so.
-- Authority snapshots use the versioned Bloodbank v2 snapshot contract and
+  Each occurrence has a deterministic `obligation_instance_id` and immutable
+  `activated_at` that persist across reconcile sweeps and restarts. Invocation
+  or review-request facts never satisfy it. Only canonical Bloodbank v2
+  completion evidence for that exact active occurrence, observed no earlier
+  than activation and carrying the exact skill, target actor, completion
+  artifact, and authoritative Momo provenance can do so. Evidence for a prior
+  occurrence cannot be reused after a later entry into WAITING.
+- Authority snapshots use the versioned Bloodbank v3 snapshot contract and
   publish each grant's authority-owned `capability_version`; clients must carry
-  that projected value back unchanged rather than choosing a default.
+  that projected value and obligation occurrence back unchanged rather than
+  choosing a default or reusing a rule identity.
 - NATS acknowledgement happens after PostgreSQL commit. Publisher failure never
   rolls back committed authority state, append-only history, idempotency records,
   or outbox envelopes.

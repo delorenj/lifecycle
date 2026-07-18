@@ -2,7 +2,7 @@
 
 Bloodbank remains the schema owner.  This module implements the narrow runtime
 consumer/producer surface locked to Bloodbank commit
-``155f2d774964d1c73694ce2c576fe5f50b91eefb``.  Contract drift is checked by
+``9b99939ce584b3569f28609f04b1847984381b16``.  Contract drift is checked by
 ``scripts/verify_bloodbank_contracts.py`` and all produced envelopes are tested
 with Bloodbank's canonical validator.
 """
@@ -26,7 +26,7 @@ from models import (
 from specification import actor_from_wire, capability_context_from_wire
 
 
-BLOODBANK_CONTRACT_COMMIT = "155f2d774964d1c73694ce2c576fe5f50b91eefb"
+BLOODBANK_CONTRACT_COMMIT = "9b99939ce584b3569f28609f04b1847984381b16"
 COMMAND_TYPE = "bloodbank.v1.lifecycle.intent.submit"
 COMMAND_SUBJECT = "bloodbank.cmd.v1.lifecycle.intent.submit"
 REPLY_SUBJECT = "bloodbank.rpy.v1.lifecycle.intent.submit"
@@ -470,9 +470,9 @@ def validate_obligation_evidence_submitted(envelope: Any) -> Observation:
         subject=OBLIGATION_EVIDENCE_SUBJECT,
         domain="lifecycle",
         dataschema=(
-            "apicurio://holyfields/bloodbank.v1.lifecycle.obligation_evidence.submitted/versions/1"
+            "apicurio://holyfields/bloodbank.v1.lifecycle.obligation_evidence.submitted/versions/2"
         ),
-        schemaref="bloodbank.v1.lifecycle.obligation_evidence.submitted.v1",
+        schemaref="bloodbank.v1.lifecycle.obligation_evidence.submitted.v2",
     )
     if value["source"] != MOMO_SOURCE:
         raise ContractError("SOURCE_INVALID", f"source must equal {MOMO_SOURCE!r}")
@@ -490,6 +490,7 @@ def validate_obligation_evidence_submitted(envelope: Any) -> Observation:
             "lifecycle_id",
             "repo",
             "obligation_id",
+            "obligation_instance_id",
             "obligation_kind",
             "target_actor_id",
             "invocation_id",
@@ -499,11 +500,12 @@ def validate_obligation_evidence_submitted(envelope: Any) -> Observation:
         },
         "data",
     )
-    if data.get("contract_version") != 1:
-        raise ContractError("CONTRACT_VERSION_UNSUPPORTED", "contract_version must be 1")
+    if data.get("contract_version") != 2:
+        raise ContractError("CONTRACT_VERSION_UNSUPPORTED", "contract_version must be 2")
     lifecycle_id = _nonblank(data.get("lifecycle_id"), "data.lifecycle_id")
     _nonblank(data.get("repo"), "data.repo", whitespace_forbidden=True)
     _nonblank(data.get("obligation_id"), "data.obligation_id")
+    _uuid(data.get("obligation_instance_id"), "data.obligation_instance_id")
     _nonblank(data.get("obligation_kind"), "data.obligation_kind")
     _nonblank(data.get("target_actor_id"), "data.target_actor_id")
     _uuid(data.get("invocation_id"), "data.invocation_id")

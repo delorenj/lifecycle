@@ -114,8 +114,12 @@ def obligation_evidence_envelope(
     obligation_id: str = "independent-review",
     obligation_kind: str = "independent_review",
     target_actor_id: str = "agent:independent-reviewer",
+    obligation_instance_id: str | None = None,
+    correlation_id: str | None = None,
+    causation_id: str | None = None,
 ) -> dict:
     invocation_id = test_uuid(f"obligation-invocation:{suffix}")
+    occurrence_id = obligation_instance_id or test_uuid(f"obligation-instance:{lifecycle_id}:1")
     return {
         "specversion": "1.0",
         "id": test_uuid(f"obligation-evidence:{suffix}"),
@@ -125,22 +129,23 @@ def obligation_evidence_envelope(
         "time": format_timestamp(completed_at),
         "datacontenttype": "application/json",
         "dataschema": (
-            "apicurio://holyfields/bloodbank.v1.lifecycle.obligation_evidence.submitted/versions/1"
+            "apicurio://holyfields/bloodbank.v1.lifecycle.obligation_evidence.submitted/versions/2"
         ),
-        "correlationid": test_uuid(f"obligation-correlation:{suffix}"),
-        "causationid": invocation_id,
+        "correlationid": correlation_id or test_uuid(f"obligation-correlation:{suffix}"),
+        "causationid": causation_id or invocation_id,
         "producer": "momo",
         "service": "momo",
         "domain": "lifecycle",
-        "schemaref": "bloodbank.v1.lifecycle.obligation_evidence.submitted.v1",
+        "schemaref": "bloodbank.v1.lifecycle.obligation_evidence.submitted.v2",
         "kind": "event",
         "actor": {"type": "service", "agent_id": "momo"},
         "ordering_key": f"lifecycle:{lifecycle_id}",
         "data": {
-            "contract_version": 1,
+            "contract_version": 2,
             "lifecycle_id": lifecycle_id,
             "repo": repo,
             "obligation_id": obligation_id,
+            "obligation_instance_id": occurrence_id,
             "obligation_kind": obligation_kind,
             "target_actor_id": target_actor_id,
             "invocation_id": invocation_id,

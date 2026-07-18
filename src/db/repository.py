@@ -1174,6 +1174,8 @@ def _row_to_state(row: Any) -> LifecycleState:
     obligations = [
         Obligation(
             id=item["id"],
+            obligation_instance_id=item["obligation_instance_id"],
+            activated_at=_required_wire_time(item["activated_at"]),
             kind=item["kind"],
             status=ObligationStatus(item["status"]),
             description=item["description"],
