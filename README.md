@@ -87,3 +87,27 @@ mise run image:build
 
 Integrated deployment consumes an immutable GHCR digest. This component does
 not define root Compose; the 33GOD platform layer owns that composition.
+
+## Current 33GOD integration
+
+The implemented 33GOD local slice runs revision
+`715ab2ea62bcece488c8d6029869af8d3651c39a` from the immutable image
+`ghcr.io/delorenj/lifecycle@sha256:e391a8aab13ca582e2026846a268a6a228c7b63c25e5d469255572e4b2988526`.
+Root Compose supplies a dedicated PostgreSQL authority volume and runs the
+published CLI in this fail-closed order: `migrate`, deterministic `bootstrap`,
+then `serve`. It does not rebuild or substitute the image.
+
+Lifecycle consumes observations and commands and publishes snapshots and stable
+command verdicts through Bloodbank's canonical JetStream streams. Candystore's
+durable consumers replay those publications into a read-only projection. Momo
+may rank the returned legal frontier and resolve authoritative obligation skill
+references; Holocene may render that projection and submit high-level commands.
+Neither client, Candystore, Bloodbank, nor root Compose derives or writes
+Lifecycle truth.
+
+The exercised local integration proves restart catch-up without duplicate
+transition effects, rejection without mutation for stale versions and invalid
+capabilities, NATS outage recovery with ordered eventual outbox publication,
+and dedicated PostgreSQL persistence across service and database-process
+restarts. Hosted/cloud deployment, multi-tenant authorization, and release-tag
+promotion remain future work and are not implied by this local slice.
