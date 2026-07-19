@@ -217,9 +217,10 @@ async def test_real_canonical_observation_command_reply_and_outbox_flow(
             headers={"Nats-Msg-Id": evidence["id"]},
         )
         evidence_messages = await transport.evidence_subscription.fetch(batch=1, timeout=2)
+        trusted_publication = evidence_messages[0].metadata.timestamp
         await runtime.handle_evidence_message(evidence_messages[0])
         claimed = await repository.claim_next_reconcile_job_record(f"evidence-{suffix}")
-        assert claimed == (lifecycle_id, NOW + timedelta(seconds=4))
+        assert claimed == (lifecycle_id, trusted_publication)
         assert await authority.reconcile_claimed(
             lifecycle_id=lifecycle_id,
             as_of=claimed[1],
@@ -326,6 +327,26 @@ async def test_nats_obligation_occurrence_rejects_old_evidence_then_unlocks(
         assert trusted_publication < activation < claimed_completion
         await runtime.handle_evidence_message(prepublished_message)
 
+        # Reproduce the production race: the worker drains future-claimed
+        # evidence before the command arrives.  Broker publication time is the
+        # authority boundary, so the producer's future completion cannot move
+        # last_reconciled_at past the subsequent activation command.
+        claimed = await _claim_for_lifecycle(
+            integration_resources,
+            repository,
+            lifecycle_id,
+            f"occurrence-{suffix}-prepublished-ingress",
+        )
+        assert claimed == (lifecycle_id, trusted_publication)
+        assert not await authority.reconcile_claimed(
+            lifecycle_id=lifecycle_id,
+            as_of=claimed[1],
+            worker_id=f"occurrence-{suffix}-prepublished-ingress",
+        )
+        after_ingress = await repository.get_lifecycle_state(lifecycle_id)
+        assert after_ingress is not None
+        assert after_ingress.last_reconciled_at < claimed_completion
+
         command = command_envelope(
             suffix=f"{suffix}-waiting",
             lifecycle_id=lifecycle_id,
@@ -348,6 +369,14 @@ async def test_nats_obligation_occurrence_rejects_old_evidence_then_unlocks(
         assert waiting.obligations[0].activated_at == activation
         assert waiting.obligations[0].status.value == "pending"
 
+        async with integration_resources.pool.acquire() as connection:
+            async with connection.transaction():
+                await repository.mark_dirty_tx(
+                    connection,
+                    lifecycle_id,
+                    "prepublished-future-claim-sweep",
+                    claimed_completion,
+                )
         claimed = await _claim_for_lifecycle(
             integration_resources,
             repository,

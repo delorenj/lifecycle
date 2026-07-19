@@ -775,10 +775,14 @@ class LifecycleAuthority:
             "SELECT last_reconciled_at FROM lifecycle_state WHERE lifecycle_id = $1",
             observation.lifecycle_id,
         )
+        # Producer-declared source time is evidence, not authority time.  A
+        # future-dated event must never move the deterministic clock forward
+        # or make a concurrently published command stale.  JetStream's
+        # immutable publication timestamp is the trusted ingress boundary;
+        # periodic sweeps will reconsider persisted future observations when
+        # authority time actually reaches them.
         reconcile_as_of = (
-            max(observation.observed_at, current_as_of)
-            if current_as_of is not None
-            else observation.observed_at
+            max(received_at, current_as_of) if current_as_of is not None else received_at
         )
         await self.repository.mark_dirty_tx(
             connection,

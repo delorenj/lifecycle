@@ -53,6 +53,11 @@ envelope whose causation ID is not its invocation ID, or whose ordering key is
 not `lifecycle:<lifecycle_id>`, is rejected before authority ingestion. An
 invocation request or review-request event is not completion evidence.
 
+Canonical observation ingestion also schedules reconciliation from that trusted
+publication timestamp, never from producer-declared source time. A future-dated
+source event is retained for a later sweep, but it cannot advance
+`last_reconciled_at` or make an otherwise current command stale.
+
 Migration `0004_obligation_occurrence_projection.sql` upgrades an already-
 persisted current occurrence from its state-history decision time. It fails
 closed if that activation time or existing occurrence metadata is malformed;

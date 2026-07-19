@@ -293,7 +293,7 @@ async def test_observation_dedup_and_restart_replay_have_no_duplicate_effect(
     assert row["observed_at"] == NOW + timedelta(seconds=10)
 
     claimed = await repository.claim_next_reconcile_job_record("worker-first")
-    assert claimed == (lifecycle_id, NOW + timedelta(seconds=10))
+    assert claimed == (lifecycle_id, NOW + timedelta(seconds=11))
     changed = await authority.reconcile_claimed(
         lifecycle_id=lifecycle_id,
         as_of=claimed[1],
@@ -800,7 +800,7 @@ async def test_obligation_occurrence_rejects_history_and_survives_restart_cycle(
         received_at=NOW + timedelta(milliseconds=500),
     )
     claimed = await repository.claim_next_reconcile_job_record(f"prepublished-{suffix}")
-    assert claimed == (lifecycle_id, NOW + timedelta(seconds=2))
+    assert claimed == (lifecycle_id, NOW + timedelta(seconds=1))
     assert await authority.reconcile_claimed(
         lifecycle_id=lifecycle_id,
         as_of=claimed[1],
@@ -809,6 +809,7 @@ async def test_obligation_occurrence_rejects_history_and_survives_restart_cycle(
     after_prepublished = await repository.get_lifecycle_state(lifecycle_id)
     assert after_prepublished is not None
     assert after_prepublished.status.value == "waiting"
+    assert after_prepublished.last_reconciled_at == NOW + timedelta(seconds=1)
     assert after_prepublished.obligations[0].status.value == "pending"
 
     preactivation = obligation_evidence_envelope(
