@@ -516,7 +516,7 @@ async def test_command_published_before_current_authority_time_is_stale_without_
 
     assert applied.result.verdict == CommandVerdict.APPLIED
     assert stale.result.verdict == CommandVerdict.STALE
-    assert stale.result.reason_code == "PUBLICATION_TIME_BEFORE_CURRENT_STATE"
+    assert stale.result.reason_code == "REQUESTED_AT_BEFORE_CURRENT_STATE"
     assert stale.result.mutated is False
     state = await repository.get_lifecycle_state(lifecycle_id)
     assert state is not None
@@ -537,23 +537,26 @@ async def test_future_requested_at_cannot_advance_or_poison_authority_chronology
         integration_resources, suffix
     )
     authority = LifecycleAuthority(repository, authority_instance="integration-trusted-time")
-    future_requested_at = NOW + timedelta(days=365)
+    future_requested_at = datetime(2099, 1, 1, tzinfo=timezone.utc)
     first_publication = NOW + timedelta(seconds=1, microseconds=987654)
     second_publication = NOW + timedelta(seconds=2, microseconds=654321)
     first_decision = first_publication.replace(microsecond=987000)
     second_decision = second_publication.replace(microsecond=654000)
 
+    first_envelope = command_envelope(
+        suffix=f"{suffix}-future-request",
+        lifecycle_id=lifecycle_id,
+        repo=repo_name,
+        actor_id=actor_id,
+        capability_id=capability_id,
+        intent_name="set_mode",
+        target="manual",
+        requested_at=future_requested_at,
+    )
+    first_envelope["time"] = "2099-01-01T00:00:00Z"
+    first_envelope["data"]["requested_at"] = "2099-01-01T00:00:00Z"
     first = await authority.handle_command_envelope(
-        command_envelope(
-            suffix=f"{suffix}-future-request",
-            lifecycle_id=lifecycle_id,
-            repo=repo_name,
-            actor_id=actor_id,
-            capability_id=capability_id,
-            intent_name="set_mode",
-            target="manual",
-            requested_at=future_requested_at,
-        ),
+        first_envelope,
         published_at=first_publication,
     )
     after_first = await repository.get_lifecycle_state(lifecycle_id)
@@ -574,6 +577,7 @@ async def test_future_requested_at_cannot_advance_or_poison_authority_chronology
     )
     after_second = await repository.get_lifecycle_state(lifecycle_id)
 
+    assert first_envelope["data"]["requested_at"] == "2099-01-01T00:00:00Z"
     assert first.command.requested_at == future_requested_at
     assert first.result.verdict == CommandVerdict.APPLIED
     assert after_first is not None

@@ -345,9 +345,9 @@ class LifecycleAuthority:
     ) -> CommandHandlingResult:
         """Handle a command at its trusted immutable publication time.
 
-        ``requested_at`` remains producer-authored request metadata and is used
-        only by command-contract and capability-causality validation. Authority
-        chronology is derived exclusively from this required trusted timestamp.
+        ``requested_at`` remains producer-authored request metadata only. Every
+        authority decision and authoritative timestamp is derived exclusively
+        from this required trusted timestamp.
         """
 
         decision_at = _canonical_authority_time(published_at)
@@ -471,12 +471,18 @@ class LifecycleAuthority:
                         request_sha256=request_sha256,
                         verdict=CommandVerdict.STALE,
                         observed_version=observed_version,
-                        reason_code="PUBLICATION_TIME_BEFORE_CURRENT_STATE",
+                        # Preserve the established reply code for wire consumers even
+                        # though staleness is now evaluated with trusted publication time.
+                        reason_code="REQUESTED_AT_BEFORE_CURRENT_STATE",
                         lifecycle_exists=True,
                         decision_at=decision_at,
                     )
 
-                grant, capability_reason = validate_capability(command, bundle.spec)
+                grant, capability_reason = validate_capability(
+                    command,
+                    bundle.spec,
+                    as_of=decision_at,
+                )
                 if grant is None:
                     return await self._record_rejection(
                         connection,
