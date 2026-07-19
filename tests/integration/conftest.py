@@ -42,7 +42,10 @@ class DockerStack:
 
     @property
     def database_url(self) -> str:
-        return f"postgresql://lifecycle:lifecycle@127.0.0.1:{self.postgres_port}/lifecycle"
+        return self.database_url_for("lifecycle")
+
+    def database_url_for(self, database_name: str) -> str:
+        return f"postgresql://lifecycle:lifecycle@127.0.0.1:{self.postgres_port}/{database_name}"
 
     @property
     def nats_url(self) -> str:
@@ -59,6 +62,7 @@ class DockerStack:
 @dataclass
 class IntegrationResources:
     stack: DockerStack
+    database_name: str
     pool: asyncpg.Pool
     nc: nats.NATS
     js: object
@@ -205,37 +209,52 @@ def docker_stack() -> DockerStack:
 async def integration_resources(
     docker_stack: DockerStack,
 ) -> IntegrationResources:
-    pool = await _create_pool_with_retry(docker_stack.database_url)
-    await apply_migrations(pool)
-    nc = await nats.connect(docker_stack.nats_url)
-    js = nc.jetstream()
-    for name, subjects, retention in (
-        (
-            "BLOODBANK_EVENTS",
-            ["bloodbank.evt.v1.>"],
-            RetentionPolicy.LIMITS,
-        ),
-        (
-            "BLOODBANK_COMMANDS",
-            ["bloodbank.cmd.v1.>", "bloodbank.rpy.v1.>"],
-            RetentionPolicy.WORK_QUEUE,
-        ),
-    ):
-        try:
-            await js.stream_info(name)
-        except NotFoundError:
-            await js.add_stream(
-                name=name,
-                subjects=subjects,
-                retention=retention,
-                storage=StorageType.FILE,
-            )
+    database_name = f"lifecycle_it_{uuid.uuid4().hex[:12]}"
+    admin_pool = await _create_pool_with_retry(docker_stack.database_url)
+    pool: asyncpg.Pool | None = None
+    nc: nats.NATS | None = None
     try:
-        yield IntegrationResources(docker_stack, pool, nc, js)
+        await admin_pool.execute(f'CREATE DATABASE "{database_name}" OWNER lifecycle')
+        pool = await _create_pool_with_retry(docker_stack.database_url_for(database_name))
+        await apply_migrations(pool)
+        nc = await nats.connect(docker_stack.nats_url)
+        js = nc.jetstream()
+        for name, subjects, retention in (
+            (
+                "BLOODBANK_EVENTS",
+                ["bloodbank.evt.v1.>"],
+                RetentionPolicy.LIMITS,
+            ),
+            (
+                "BLOODBANK_COMMANDS",
+                ["bloodbank.cmd.v1.>", "bloodbank.rpy.v1.>"],
+                RetentionPolicy.WORK_QUEUE,
+            ),
+        ):
+            try:
+                await js.stream_info(name)
+            except NotFoundError:
+                await js.add_stream(
+                    name=name,
+                    subjects=subjects,
+                    retention=retention,
+                    storage=StorageType.FILE,
+                )
+        yield IntegrationResources(docker_stack, database_name, pool, nc, js)
     finally:
-        if not nc.is_closed:
+        if nc is not None and not nc.is_closed:
             try:
                 await nc.drain()
             except Exception:
                 await nc.close()
-        await pool.close()
+        if pool is not None:
+            await pool.close()
+        try:
+            await admin_pool.execute(
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                "WHERE datname = $1 AND pid <> pg_backend_pid()",
+                database_name,
+            )
+            await admin_pool.execute(f'DROP DATABASE IF EXISTS "{database_name}"')
+        finally:
+            await admin_pool.close()

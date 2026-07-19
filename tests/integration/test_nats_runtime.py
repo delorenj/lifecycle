@@ -51,6 +51,12 @@ async def _bootstrap(resources, suffix: str):
     return repository, lifecycle_id, repo_name, actor_id, capability_id
 
 
+async def _assert_fresh_authority_database(resources) -> None:
+    assert await resources.pool.fetchval("SELECT current_database()") == resources.database_name
+    assert resources.database_name != "lifecycle"
+    assert await resources.pool.fetchval("SELECT COUNT(*) FROM lifecycle_event_outbox") == 0
+
+
 async def _transport(resources, suffix: str) -> BloodbankTransport:
     transport = BloodbankTransport(
         servers=[resources.stack.nats_url],
@@ -145,6 +151,7 @@ async def _capture_for_lifecycle(resources, lifecycle_id: str, suffix: str):
 async def test_real_canonical_observation_command_reply_and_outbox_flow(
     integration_resources,
 ) -> None:
+    await _assert_fresh_authority_database(integration_resources)
     suffix = uuid.uuid4().hex[:8]
     repository, lifecycle_id, repo_name, actor_id, capability_id = await _bootstrap(
         integration_resources, suffix
@@ -280,6 +287,7 @@ async def test_real_canonical_observation_command_reply_and_outbox_flow(
 async def test_nats_obligation_occurrence_rejects_old_evidence_then_unlocks(
     integration_resources,
 ) -> None:
+    await _assert_fresh_authority_database(integration_resources)
     suffix = uuid.uuid4().hex[:8]
     repository, lifecycle_id, repo_name, actor_id, capability_id = await _bootstrap(
         integration_resources, suffix
@@ -476,6 +484,7 @@ async def test_nats_obligation_occurrence_rejects_old_evidence_then_unlocks(
 async def test_publisher_outage_commit_retry_and_restart_catchup(
     integration_resources,
 ) -> None:
+    await _assert_fresh_authority_database(integration_resources)
     suffix = uuid.uuid4().hex[:8]
     repository, lifecycle_id, repo_name, actor_id, capability_id = await _bootstrap(
         integration_resources, suffix

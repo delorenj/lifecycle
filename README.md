@@ -93,7 +93,10 @@ LIFECYCLE_RUN_INTEGRATION=1 uv run pytest -m integration
 ```
 
 Integration tests create uniquely named PostgreSQL/NATS containers, network,
-ports, and volumes. Their teardown removes only those exact test-owned resources.
+ports, and volumes. Each test runs migrations in its own uniquely named database
+inside the test-owned PostgreSQL container, so aggregate runs cannot inherit
+authority or outbox rows from an earlier test. Teardown drops each exact test
+database and removes only the exact test-owned container resources.
 
 Build a local image with source labels:
 
