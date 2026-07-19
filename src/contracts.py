@@ -2,7 +2,7 @@
 
 Bloodbank remains the schema owner.  This module implements the narrow runtime
 consumer/producer surface locked to Bloodbank commit
-``48031ee39c238b9d4715b81b74076635235f96d5``.  Contract drift is checked by
+``aacd88564ea299924b8298165933ba821640bdba``.  Contract drift is checked by
 ``scripts/verify_bloodbank_contracts.py`` and all produced envelopes are tested
 with Bloodbank's canonical validator.
 """
@@ -26,7 +26,7 @@ from models import (
 from specification import actor_from_wire, capability_context_from_wire
 
 
-BLOODBANK_CONTRACT_COMMIT = "48031ee39c238b9d4715b81b74076635235f96d5"
+BLOODBANK_CONTRACT_COMMIT = "aacd88564ea299924b8298165933ba821640bdba"
 COMMAND_TYPE = "bloodbank.v1.lifecycle.intent.submit"
 COMMAND_SUBJECT = "bloodbank.cmd.v1.lifecycle.intent.submit"
 REPLY_SUBJECT = "bloodbank.rpy.v1.lifecycle.intent.submit"

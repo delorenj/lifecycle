@@ -1,5 +1,5 @@
 {
-  "bloodbank_commit": "48031ee39c238b9d4715b81b74076635235f96d5",
+  "bloodbank_commit": "aacd88564ea299924b8298165933ba821640bdba",
   "files": {
     "compose/nats/streams.json": "9fb13b307d5f9126dce9a828e425dea30a68dd4f151621221213ce070fa7d4e6",
     "docs/lifecycle-contracts.md": "0f0a07e1900a429c7d1c1006b38b27b1a77905ea09ca8d195cae90f1202cd307",

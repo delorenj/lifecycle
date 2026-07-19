@@ -126,5 +126,5 @@ The exercised local integration proves restart catch-up without duplicate
 transition effects, rejection without mutation for stale versions and invalid
 capabilities, NATS outage recovery with ordered eventual outbox publication,
 and dedicated PostgreSQL persistence across service and database-process
-restarts. Hosted/cloud deployment, multi-tenant authorization, and release-tag
-promotion remain future work and are not implied by this local slice.
+restarts. Hosted/cloud deployment and multi-tenant authorization remain
+future work and are not implied by this local slice.
