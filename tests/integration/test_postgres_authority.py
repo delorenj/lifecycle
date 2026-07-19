@@ -502,6 +502,53 @@ async def test_command_requested_before_current_authority_time_is_stale_without_
 
 
 @pytest.mark.asyncio
+async def test_causal_command_uses_snapshot_precision_after_broker_publication(
+    integration_resources,
+) -> None:
+    suffix = uuid.uuid4().hex[:8]
+    repository, lifecycle_id, repo_name, actor_id, capability_id = await _bootstrap(
+        integration_resources, suffix
+    )
+    authority = LifecycleAuthority(repository, authority_instance="integration-wire-time")
+    publication = NOW + timedelta(seconds=10, microseconds=789)
+    envelope = repo_task_envelope(
+        suffix=f"{suffix}-wire-time",
+        observed_at=NOW + timedelta(seconds=9),
+        repo=repo_name,
+    )
+    assert await authority.ingest_repo_task_envelope(
+        envelope,
+        received_at=publication,
+    )
+    claimed = await repository.claim_next_reconcile_job_record(f"wire-time-{suffix}")
+    assert claimed == (lifecycle_id, publication)
+    assert await authority.reconcile_claimed(
+        lifecycle_id=lifecycle_id,
+        as_of=claimed[1],
+        worker_id=f"wire-time-{suffix}",
+    )
+    observed = await repository.get_lifecycle_state(lifecycle_id)
+    assert observed is not None
+    assert observed.last_reconciled_at == NOW + timedelta(seconds=10)
+
+    applied = await authority.handle_command_envelope(
+        command_envelope(
+            suffix=f"{suffix}-causal-command",
+            lifecycle_id=lifecycle_id,
+            repo=repo_name,
+            expected_state_version=observed.state_version,
+            actor_id=actor_id,
+            capability_id=capability_id,
+            target="waiting",
+            requested_at=observed.last_reconciled_at,
+        )
+    )
+    assert applied.result.verdict == CommandVerdict.APPLIED
+    assert applied.result.observed_state_version == observed.state_version
+    assert applied.result.resulting_state_version == observed.state_version + 1
+
+
+@pytest.mark.asyncio
 async def test_global_command_identity_race_is_serialized_across_lifecycles(
     integration_resources,
 ) -> None:

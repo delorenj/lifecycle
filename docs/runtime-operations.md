@@ -57,6 +57,10 @@ Canonical observation ingestion also schedules reconciliation from that trusted
 publication timestamp, never from producer-declared source time. A future-dated
 source event is retained for a later sweep, but it cannot advance
 `last_reconciled_at` or make an otherwise current command stale.
+The raw broker timestamp remains persisted as observation provenance. Lifecycle
+projects deterministic state decisions onto the same UTC millisecond precision
+used by canonical Bloodbank envelopes, so a client can safely derive its next
+`requested_at` from the authoritative snapshot without sub-millisecond drift.
 
 Migration `0004_obligation_occurrence_projection.sql` upgrades an already-
 persisted current occurrence from its state-history decision time. It fails

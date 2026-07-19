@@ -278,6 +278,13 @@ def _trusted_publication_time(value: datetime) -> datetime:
     return value.astimezone(UTC)
 
 
+def _canonical_authority_time(value: datetime) -> datetime:
+    """Project authority decisions onto the canonical millisecond wire clock."""
+
+    value = _trusted_publication_time(value)
+    return value.replace(microsecond=(value.microsecond // 1000) * 1000)
+
+
 def _project_command_state(
     *,
     bundle: AuthorityBundle,
@@ -357,12 +364,13 @@ class LifecycleAuthority:
         malformed_reason: str | None = None,
     ) -> CommandHandlingResult:
         request_sha256 = payload_sha256(command.raw_envelope)
+        decision_at = _canonical_authority_time(command.requested_at)
         async with self.repository.pool.acquire() as connection:
             async with connection.transaction():
                 bundle = await self.repository.load_bundle(
                     connection,
                     command.lifecycle_id,
-                    as_of=command.requested_at,
+                    as_of=decision_at,
                     for_update=True,
                 )
                 if bundle is None:
@@ -439,7 +447,7 @@ class LifecycleAuthority:
                     )
                 if (
                     bundle.state.last_reconciled_at is not None
-                    and command.requested_at < bundle.state.last_reconciled_at
+                    and decision_at < _canonical_authority_time(bundle.state.last_reconciled_at)
                 ):
                     return await self._record_rejection(
                         connection,
@@ -466,7 +474,7 @@ class LifecycleAuthority:
                     bundle.state,
                     bundle.spec,
                     bundle.observations,
-                    command.requested_at,
+                    decision_at,
                 )
                 legal, legal_reason = intent_is_legal(
                     command,
@@ -495,14 +503,14 @@ class LifecycleAuthority:
                         lifecycle_id=bundle.lifecycle_id,
                         gate_id=command.intent.target,
                         resolution=command.intent.parameters["resolution"],
-                        resolved_at=command.requested_at,
+                        resolved_at=decision_at,
                     )
                     gates = [gate for gate in gates if gate.id != command.intent.target]
 
                 current_state = _project_command_state(
                     bundle=bundle,
                     gates=gates,
-                    as_of=command.requested_at,
+                    as_of=decision_at,
                     intent_name=command.intent.name,
                     intent_target=command.intent.target,
                     reason_code=legal_reason,
@@ -544,7 +552,7 @@ class LifecycleAuthority:
                 await self.repository.discard_reconcile_through_tx(
                     connection,
                     lifecycle_id=bundle.lifecycle_id,
-                    through=command.requested_at,
+                    through=decision_at,
                 )
                 await self._stage_state_publications(
                     connection,
@@ -552,7 +560,7 @@ class LifecycleAuthority:
                     previous_state=bundle.state,
                     current_state=current_state,
                     gates=gates,
-                    as_of=command.requested_at,
+                    as_of=decision_at,
                     transition_reason=legal_reason,
                     correlation_id=command.correlation_id,
                     causation_id=command.event_id,
@@ -801,12 +809,14 @@ class LifecycleAuthority:
     ) -> bool:
         """Reconcile one claimed queue generation in a single authority transaction."""
 
+        claimed_as_of = as_of
+        decision_at = _canonical_authority_time(as_of)
         async with self.repository.pool.acquire() as connection:
             async with connection.transaction():
                 bundle = await self.repository.load_bundle(
                     connection,
                     lifecycle_id,
-                    as_of=as_of,
+                    as_of=decision_at,
                     for_update=True,
                 )
                 if bundle is None:
@@ -814,18 +824,18 @@ class LifecycleAuthority:
                         connection,
                         lifecycle_id=lifecycle_id,
                         worker_id=worker_id,
-                        claimed_as_of=as_of,
+                        claimed_as_of=claimed_as_of,
                     )
                     return False
                 if (
                     bundle.state.last_reconciled_at is not None
-                    and as_of < bundle.state.last_reconciled_at
+                    and decision_at < _canonical_authority_time(bundle.state.last_reconciled_at)
                 ):
                     await self.repository.complete_reconcile_job_tx(
                         connection,
                         lifecycle_id=lifecycle_id,
                         worker_id=worker_id,
-                        claimed_as_of=as_of,
+                        claimed_as_of=claimed_as_of,
                     )
                     return False
                 result = reconcile(
@@ -837,7 +847,7 @@ class LifecycleAuthority:
                     checkpoints=bundle.checkpoints,
                     sentinel_health=bundle.sentinel_health,
                     spec=bundle.spec,
-                    as_of=as_of,
+                    as_of=decision_at,
                 )
                 if result.state_changed:
                     await self.repository.persist_state_tx(
@@ -862,7 +872,7 @@ class LifecycleAuthority:
                         previous_state=bundle.state,
                         current_state=result.current_state,
                         gates=bundle.gates,
-                        as_of=as_of,
+                        as_of=decision_at,
                         transition_reason=result.current_state.status_reason,
                         correlation_id=correlation_id,
                         causation_id=None,
@@ -872,7 +882,7 @@ class LifecycleAuthority:
                     connection,
                     lifecycle_id=lifecycle_id,
                     worker_id=worker_id,
-                    claimed_as_of=as_of,
+                    claimed_as_of=claimed_as_of,
                 )
                 return result.state_changed
 
