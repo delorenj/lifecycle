@@ -6,7 +6,7 @@ import asyncio
 import json
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 import nats
@@ -33,27 +33,71 @@ OBSERVATION_SUBJECT = "bloodbank.evt.v1.repo.task.recorded"
 EVIDENCE_SUBJECT = "bloodbank.evt.v1.lifecycle.obligation_evidence.submitted"
 
 
+_ACK_V1_TOKEN_COUNT = 9
+_ACK_V1_STREAM_INDEX = 2
+_ACK_V1_TIMESTAMP_INDEX = 7
+_ACK_V2_MIN_TOKEN_COUNT = 11
+_NANOSECONDS_PER_SECOND = 1_000_000_000
+_UNIX_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+
+
+def _parse_ack_reply_publication_time(reply: str, *, expected_stream: str) -> datetime:
+    """Parse the immutable storage timestamp from a raw JetStream ACK reply.
+
+    The ACK reply subject carries the exact nanosecond storage timestamp
+    (``$JS.ACK.<stream>.<consumer>.<delivered>.<sseq>.<cseq>.<timestamp_ns>.<pending>``
+    for V1, with domain/account-hash tokens inserted ahead of the stream for
+    V2). nats-py's ``metadata.timestamp`` derives it through float division and
+    rounds sub-microsecond digits, so the raw tokens are converted with integer
+    arithmetic: whole seconds plus ``remainder_ns // 1000`` microseconds, which
+    matches canonical RFC3339 stream parsing truncation exactly.
+    """
+    tokens = reply.split(".")
+    if len(tokens) < 2 or tokens[0] != Msg.Ack.Prefix0 or tokens[1] != Msg.Ack.Prefix1:
+        raise RuntimeError(f"reply subject {reply!r} is not a JetStream ACK reply")
+    if len(tokens) == _ACK_V1_TOKEN_COUNT:
+        raw_stream = tokens[_ACK_V1_STREAM_INDEX]
+        timestamp_token = tokens[_ACK_V1_TIMESTAMP_INDEX]
+    elif len(tokens) >= _ACK_V2_MIN_TOKEN_COUNT:
+        raw_stream = tokens[Msg.Ack.Stream]
+        timestamp_token = tokens[Msg.Ack.Timestamp]
+    else:
+        raise RuntimeError(f"JetStream ACK reply {reply!r} has an unexpected token count")
+    if raw_stream != expected_stream:
+        raise RuntimeError(
+            f"JetStream ACK reply stream {raw_stream!r} does not equal {expected_stream!r}"
+        )
+    if not timestamp_token.isascii() or not timestamp_token.isdigit():
+        raise RuntimeError(
+            f"JetStream ACK reply timestamp {timestamp_token!r} is not a nonnegative integer"
+        )
+    seconds, remainder_ns = divmod(int(timestamp_token), _NANOSECONDS_PER_SECOND)
+    return _UNIX_EPOCH + timedelta(seconds=seconds, microseconds=remainder_ns // 1000)
+
+
 def _trusted_publication_time(message: Msg, *, expected_stream: str) -> datetime:
     """Return the immutable JetStream storage timestamp for a durable message.
 
-    A local consumer clock is not evidence of when a replayed event entered the
-    canonical stream. Missing or inconsistent JetStream metadata is therefore
-    an operational retry condition rather than a poison-message verdict.
+    The publication instant is parsed from the raw ACK reply subject with
+    integer arithmetic; nats-py's float-derived ``metadata.timestamp`` is never
+    trusted, and there is no fallback to CloudEvent time, requested_at, or any
+    local clock. JetStream metadata is consulted only as an additional stream
+    consistency check. A local consumer clock is not evidence of when a
+    replayed event entered the canonical stream. Missing or inconsistent
+    JetStream metadata is therefore an operational retry condition rather than
+    a poison-message verdict.
     """
-
-    metadata = message.metadata
-    if metadata.stream != expected_stream:
+    reply = message.reply
+    if not reply:
+        raise RuntimeError("message is missing a JetStream ACK reply subject")
+    published_at = _parse_ack_reply_publication_time(reply, expected_stream=expected_stream)
+    metadata_stream = message.metadata.stream
+    if metadata_stream != expected_stream:
         raise RuntimeError(
-            f"JetStream metadata stream {metadata.stream!r} does not equal {expected_stream!r}"
+            f"JetStream metadata stream {metadata_stream!r} does not equal "
+            f"ACK reply stream {expected_stream!r}"
         )
-    published_at = metadata.timestamp
-    if (
-        not isinstance(published_at, datetime)
-        or published_at.tzinfo is None
-        or published_at.utcoffset() is None
-    ):
-        raise RuntimeError("JetStream metadata is missing a trusted publication timestamp")
-    return published_at.astimezone(UTC)
+    return published_at
 
 
 @dataclass

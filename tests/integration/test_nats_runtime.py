@@ -11,7 +11,13 @@ from nats.js.errors import FetchTimeoutError
 import pytest
 
 from authority import LifecycleAuthority
-from bloodbank import BloodbankTransport, JetStreamRuntime
+from bloodbank import (
+    COMMAND_STREAM,
+    EVENT_STREAM,
+    BloodbankTransport,
+    JetStreamRuntime,
+    _trusted_publication_time,
+)
 from contracts import canonical_json, parse_timestamp
 from db.repository import LifecycleRepository
 from models import CapabilityGrant, CommandVerdict
@@ -196,7 +202,10 @@ async def test_real_canonical_observation_command_reply_and_outbox_flow(
             headers={"Nats-Msg-Id": command["id"]},
         )
         command_messages = await transport.command_subscription.fetch(batch=1, timeout=2)
-        trusted_command_publication = command_messages[0].metadata.timestamp
+        trusted_command_publication = _trusted_publication_time(
+            command_messages[0],
+            expected_stream=COMMAND_STREAM,
+        )
         canonical_command_publication = trusted_command_publication.replace(
             microsecond=(trusted_command_publication.microsecond // 1000) * 1000
         )
@@ -230,7 +239,10 @@ async def test_real_canonical_observation_command_reply_and_outbox_flow(
             headers={"Nats-Msg-Id": evidence["id"]},
         )
         evidence_messages = await transport.evidence_subscription.fetch(batch=1, timeout=2)
-        trusted_publication = evidence_messages[0].metadata.timestamp
+        trusted_publication = _trusted_publication_time(
+            evidence_messages[0],
+            expected_stream=EVENT_STREAM,
+        )
         await runtime.handle_evidence_message(evidence_messages[0])
         claimed = await repository.claim_next_reconcile_job_record(f"evidence-{suffix}")
         assert claimed == (lifecycle_id, trusted_publication)
@@ -335,7 +347,10 @@ async def test_nats_obligation_occurrence_rejects_old_evidence_then_unlocks(
             transport.evidence_subscription,
             lifecycle_id,
         )
-        trusted_publication = prepublished_message.metadata.timestamp
+        trusted_publication = _trusted_publication_time(
+            prepublished_message,
+            expected_stream=EVENT_STREAM,
+        )
         planned_activation = trusted_publication + timedelta(seconds=0.5)
         await runtime.handle_evidence_message(prepublished_message)
 
@@ -377,7 +392,10 @@ async def test_nats_obligation_occurrence_rejects_old_evidence_then_unlocks(
             headers={"Nats-Msg-Id": command["id"]},
         )
         message = await _fetch_for_lifecycle(transport.command_subscription, lifecycle_id)
-        command_publication = message.metadata.timestamp
+        command_publication = _trusted_publication_time(
+            message,
+            expected_stream=COMMAND_STREAM,
+        )
         activation = command_publication.replace(
             microsecond=(command_publication.microsecond // 1000) * 1000
         )
