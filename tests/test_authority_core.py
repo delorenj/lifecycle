@@ -47,14 +47,18 @@ from tests.schema_validation import validate_with_bloodbank
 NOW = datetime(2026, 7, 18, 16, 0, tzinfo=timezone.utc)
 
 
-def _grant(*, expires_at: datetime | None = None) -> CapabilityGrant:
+def _grant(
+    *,
+    issued_at: datetime | None = None,
+    expires_at: datetime | None = None,
+) -> CapabilityGrant:
     return CapabilityGrant(
         capability_id="cap-test",
         capability_version=1,
         actor_id="agent:test",
         actions=(CAPABILITY_ACTION,),
         scope="lifecycle:lc_test",
-        issued_at=NOW - timedelta(minutes=1),
+        issued_at=issued_at or NOW - timedelta(minutes=1),
         expires_at=expires_at,
         state_version=1,
     )
@@ -160,16 +164,36 @@ def test_repo_task_observation_preserves_identity_and_ignores_provider_columns()
     assert result.current_state.source_observation_ids == [observation.observation_id]
 
 
-def test_actor_capability_validation_is_fail_closed_and_uses_requested_time() -> None:
-    command = validate_intent_command(command_envelope(suffix="cap", requested_at=NOW))
-    valid_spec = default_spec("lc_test", capabilities=(_grant(),))
-    expired_spec = default_spec(
+def test_capability_validity_uses_trusted_authority_time_not_requested_at() -> None:
+    issued_at = NOW
+    expires_at = NOW + timedelta(minutes=10)
+    spec = default_spec(
         "lc_test",
-        capabilities=(_grant(expires_at=NOW),),
+        capabilities=(_grant(issued_at=issued_at, expires_at=expires_at),),
+    )
+    producer_outside_window = validate_intent_command(
+        command_envelope(
+            suffix="cap-producer-outside",
+            requested_at=datetime(2099, 1, 1, tzinfo=timezone.utc),
+        )
+    )
+    producer_inside_window = validate_intent_command(
+        command_envelope(
+            suffix="cap-producer-inside",
+            requested_at=issued_at + timedelta(minutes=5),
+        )
     )
 
-    grant, reason = validate_capability(command, valid_spec)
-    expired, expired_reason = validate_capability(command, expired_spec)
+    grant, reason = validate_capability(
+        producer_outside_window,
+        spec,
+        as_of=issued_at + timedelta(minutes=1),
+    )
+    expired, expired_reason = validate_capability(
+        producer_inside_window,
+        spec,
+        as_of=expires_at,
+    )
 
     assert grant is not None
     assert reason == "CAPABILITY_VALID"

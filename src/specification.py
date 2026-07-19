@@ -368,8 +368,10 @@ def projected_capabilities(spec: LifecycleSpec, state_version: int) -> list[Capa
 def validate_capability(
     command: IntentCommand,
     spec: LifecycleSpec,
+    *,
+    as_of: datetime,
 ) -> tuple[CapabilityGrant | None, str]:
-    """Validate actor, context, scope, version, action, and caller-time expiry."""
+    """Validate actor, context, scope, version, action, and authority-time validity."""
 
     context = command.capability
     if context.action != CAPABILITY_ACTION:
@@ -396,9 +398,9 @@ def validate_capability(
         return None, "CAPABILITY_GRANT_MISMATCH"
     if CAPABILITY_ACTION not in grant.actions and command.intent.name not in grant.actions:
         return None, "CAPABILITY_ACTION_DENIED"
-    if command.requested_at < grant.issued_at:
+    if as_of < grant.issued_at:
         return None, "CAPABILITY_NOT_YET_VALID"
-    if grant.expires_at is not None and command.requested_at >= grant.expires_at:
+    if grant.expires_at is not None and as_of >= grant.expires_at:
         return None, "CAPABILITY_EXPIRED"
     return grant, "CAPABILITY_VALID"
 
