@@ -118,6 +118,44 @@ async def test_evidence_without_jetstream_publication_metadata_is_retried() -> N
 
 
 @pytest.mark.asyncio
+async def test_command_without_jetstream_publication_metadata_is_retried() -> None:
+    class MissingMetadataMessage:
+        data = b"{}"
+
+        def __init__(self) -> None:
+            self.nak_delays: list[int] = []
+            self.terminated = False
+
+        @property
+        def metadata(self):
+            raise RuntimeError("not a JetStream message")
+
+        async def nak(self, *, delay: int) -> None:
+            self.nak_delays.append(delay)
+
+        async def term(self) -> None:
+            self.terminated = True
+
+    class AuthorityMustNotRun:
+        async def handle_command_envelope(self, *args, **kwargs):
+            raise AssertionError("authority must not handle an untrusted command")
+
+    message = MissingMetadataMessage()
+    transport = SimpleNamespace(metrics=RuntimeMetrics())
+    runtime = JetStreamRuntime(
+        repository=SimpleNamespace(),
+        authority=AuthorityMustNotRun(),
+        transport=transport,
+    )
+
+    await runtime.handle_command_message(message)
+
+    assert message.nak_delays == [1]
+    assert message.terminated is False
+    assert transport.metrics.counters == {"command_retry": 1}
+
+
+@pytest.mark.asyncio
 async def test_claim_next_reconcile_job_uses_safe_interval_math_and_expired_leases():
     pool = _FakePool()
     repo = LifecycleRepository(pool)

@@ -256,7 +256,13 @@ class JetStreamRuntime:
     async def handle_command_message(self, message: Msg) -> None:
         try:
             envelope = json.loads(message.data)
-            result = await self.authority.handle_command_envelope(envelope)
+            result = await self.authority.handle_command_envelope(
+                envelope,
+                published_at=_trusted_publication_time(
+                    message,
+                    expected_stream=COMMAND_STREAM,
+                ),
+            )
             await message.ack_sync()
             self.transport.metrics.increment(f"command_{result.result.verdict.value}")
         except (json.JSONDecodeError, UnicodeDecodeError, UnaddressableCommand) as exc:

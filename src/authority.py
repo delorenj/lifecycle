@@ -340,7 +340,17 @@ class LifecycleAuthority:
     async def handle_command_envelope(
         self,
         envelope: Any,
+        *,
+        published_at: datetime,
     ) -> CommandHandlingResult:
+        """Handle a command at its trusted immutable publication time.
+
+        ``requested_at`` remains producer-authored request metadata and is used
+        only by command-contract and capability-causality validation. Authority
+        chronology is derived exclusively from this required trusted timestamp.
+        """
+
+        decision_at = _canonical_authority_time(published_at)
         try:
             command = validate_intent_command(envelope)
         except ContractError as strict_error:
@@ -353,18 +363,19 @@ class LifecycleAuthority:
                 ) from strict_error
             return await self._handle_command(
                 command,
+                decision_at=decision_at,
                 malformed_reason=strict_error.reason_code,
             )
-        return await self._handle_command(command)
+        return await self._handle_command(command, decision_at=decision_at)
 
     async def _handle_command(
         self,
         command: Any,
         *,
+        decision_at: datetime,
         malformed_reason: str | None = None,
     ) -> CommandHandlingResult:
         request_sha256 = payload_sha256(command.raw_envelope)
-        decision_at = _canonical_authority_time(command.requested_at)
         async with self.repository.pool.acquire() as connection:
             async with connection.transaction():
                 bundle = await self.repository.load_bundle(
@@ -398,6 +409,7 @@ class LifecycleAuthority:
                         request_sha256=request_sha256,
                         existing=existing,
                         lifecycle_exists=bundle is not None,
+                        decision_at=decision_at,
                     )
 
                 observed_version = (
@@ -414,6 +426,7 @@ class LifecycleAuthority:
                         observed_version=observed_version,
                         reason_code=malformed_reason,
                         lifecycle_exists=bundle is not None,
+                        decision_at=decision_at,
                     )
                 if bundle is None:
                     return await self._record_rejection(
@@ -424,6 +437,7 @@ class LifecycleAuthority:
                         observed_version=observed_version,
                         reason_code="LIFECYCLE_NOT_FOUND",
                         lifecycle_exists=False,
+                        decision_at=decision_at,
                     )
                 if command.repo != bundle.repo:
                     return await self._record_rejection(
@@ -434,6 +448,7 @@ class LifecycleAuthority:
                         observed_version=observed_version,
                         reason_code="REPO_BINDING_MISMATCH",
                         lifecycle_exists=True,
+                        decision_at=decision_at,
                     )
                 if command.expected_state_version != bundle.state.state_version:
                     return await self._record_rejection(
@@ -444,6 +459,7 @@ class LifecycleAuthority:
                         observed_version=observed_version,
                         reason_code="EXPECTED_STATE_VERSION_MISMATCH",
                         lifecycle_exists=True,
+                        decision_at=decision_at,
                     )
                 if (
                     bundle.state.last_reconciled_at is not None
@@ -455,8 +471,9 @@ class LifecycleAuthority:
                         request_sha256=request_sha256,
                         verdict=CommandVerdict.STALE,
                         observed_version=observed_version,
-                        reason_code="REQUESTED_AT_BEFORE_CURRENT_STATE",
+                        reason_code="PUBLICATION_TIME_BEFORE_CURRENT_STATE",
                         lifecycle_exists=True,
+                        decision_at=decision_at,
                     )
 
                 grant, capability_reason = validate_capability(command, bundle.spec)
@@ -469,6 +486,7 @@ class LifecycleAuthority:
                         observed_version=observed_version,
                         reason_code=capability_reason,
                         lifecycle_exists=True,
+                        decision_at=decision_at,
                     )
                 current_obligations = compute_obligations(
                     bundle.state,
@@ -494,6 +512,7 @@ class LifecycleAuthority:
                         reason_code=legal_reason,
                         lifecycle_exists=True,
                         capability_id=grant.capability_id,
+                        decision_at=decision_at,
                     )
 
                 gates = list(bundle.gates)
@@ -532,7 +551,7 @@ class LifecycleAuthority:
                 reply = build_reply_envelope(
                     command=command,
                     result=result,
-                    responded_at=command.requested_at,
+                    responded_at=decision_at,
                     authority_instance=self.authority_instance,
                 )
                 await self.repository.persist_state_tx(
@@ -572,14 +591,14 @@ class LifecycleAuthority:
                     request_sha256=request_sha256,
                     result=result,
                     reply_envelope=reply,
-                    created_at=command.requested_at,
+                    created_at=decision_at,
                 )
                 await self.repository.stage_outbox_tx(
                     connection,
                     lifecycle_id=bundle.lifecycle_id,
                     envelope=reply,
                     aggregate_version=current_state.state_version,
-                    created_at=command.requested_at,
+                    created_at=decision_at,
                 )
                 return CommandHandlingResult(command, result, reply)
 
@@ -591,6 +610,7 @@ class LifecycleAuthority:
         request_sha256: str,
         existing: Mapping[str, Any],
         lifecycle_exists: bool,
+        decision_at: datetime,
     ) -> CommandHandlingResult:
         recorded = _row_result(existing)
         same_request = (
@@ -624,7 +644,7 @@ class LifecycleAuthority:
         reply = build_reply_envelope(
             command=command,
             result=result,
-            responded_at=command.requested_at,
+            responded_at=decision_at,
             authority_instance=self.authority_instance,
         )
         await self.repository.stage_outbox_tx(
@@ -632,7 +652,7 @@ class LifecycleAuthority:
             lifecycle_id=command.lifecycle_id if lifecycle_exists else None,
             envelope=reply,
             aggregate_version=result.resulting_state_version,
-            created_at=command.requested_at,
+            created_at=decision_at,
         )
         return CommandHandlingResult(command, result, reply)
 
@@ -647,6 +667,7 @@ class LifecycleAuthority:
         reason_code: str,
         lifecycle_exists: bool,
         capability_id: str | None = None,
+        decision_at: datetime,
     ) -> CommandHandlingResult:
         result = CommandResult(
             verdict=verdict,
@@ -660,7 +681,7 @@ class LifecycleAuthority:
         reply = build_reply_envelope(
             command=command,
             result=result,
-            responded_at=command.requested_at,
+            responded_at=decision_at,
             authority_instance=self.authority_instance,
         )
         await self.repository.insert_command_result_tx(
@@ -669,14 +690,14 @@ class LifecycleAuthority:
             request_sha256=request_sha256,
             result=result,
             reply_envelope=reply,
-            created_at=command.requested_at,
+            created_at=decision_at,
         )
         await self.repository.stage_outbox_tx(
             connection,
             lifecycle_id=command.lifecycle_id if lifecycle_exists else None,
             envelope=reply,
             aggregate_version=None,
-            created_at=command.requested_at,
+            created_at=decision_at,
         )
         return CommandHandlingResult(command, result, reply)
 
