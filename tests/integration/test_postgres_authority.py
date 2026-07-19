@@ -86,8 +86,14 @@ async def test_atomic_command_idempotency_and_all_stable_rejections(
         requested_at=NOW + timedelta(seconds=1),
     )
 
-    applied = await authority.handle_command_envelope(applied_envelope)
-    retry = await authority.handle_command_envelope(applied_envelope)
+    applied = await authority.handle_command_envelope(
+        applied_envelope,
+        published_at=NOW + timedelta(seconds=1),
+    )
+    retry = await authority.handle_command_envelope(
+        applied_envelope,
+        published_at=NOW + timedelta(seconds=1),
+    )
 
     assert applied.result.verdict == CommandVerdict.APPLIED
     assert applied.result.mutated is True
@@ -106,7 +112,8 @@ async def test_atomic_command_idempotency_and_all_stable_rejections(
             capability_id=capability_id,
             target="active",
             requested_at=NOW + timedelta(seconds=2),
-        )
+        ),
+        published_at=NOW + timedelta(seconds=2),
     )
     unauthorized = await authority.handle_command_envelope(
         command_envelope(
@@ -118,7 +125,8 @@ async def test_atomic_command_idempotency_and_all_stable_rejections(
             capability_id=capability_id,
             target="active",
             requested_at=NOW + timedelta(seconds=3),
-        )
+        ),
+        published_at=NOW + timedelta(seconds=3),
     )
     illegal = await authority.handle_command_envelope(
         command_envelope(
@@ -131,7 +139,8 @@ async def test_atomic_command_idempotency_and_all_stable_rejections(
             target="completed",
             parameters={"confirmed": True},
             requested_at=NOW + timedelta(seconds=4),
-        )
+        ),
+        published_at=NOW + timedelta(seconds=4),
     )
     malformed_envelope = command_envelope(
         suffix=f"{suffix}-malformed",
@@ -144,7 +153,10 @@ async def test_atomic_command_idempotency_and_all_stable_rejections(
         requested_at=NOW + timedelta(seconds=5),
     )
     malformed_envelope["data"]["intent"]["parameters"] = "invalid"
-    malformed = await authority.handle_command_envelope(malformed_envelope)
+    malformed = await authority.handle_command_envelope(
+        malformed_envelope,
+        published_at=NOW + timedelta(seconds=5),
+    )
     malformed_actor_envelope = command_envelope(
         suffix=f"{suffix}-malformed-actor",
         lifecycle_id=lifecycle_id,
@@ -156,7 +168,10 @@ async def test_atomic_command_idempotency_and_all_stable_rejections(
         requested_at=NOW + timedelta(seconds=6),
     )
     malformed_actor_envelope["actor"]["provider"] = 33
-    malformed_actor = await authority.handle_command_envelope(malformed_actor_envelope)
+    malformed_actor = await authority.handle_command_envelope(
+        malformed_actor_envelope,
+        published_at=NOW + timedelta(seconds=6),
+    )
 
     assert stale.result.verdict == CommandVerdict.STALE
     assert unauthorized.result.verdict == CommandVerdict.UNAUTHORIZED
@@ -209,7 +224,10 @@ async def test_transaction_aborts_state_history_result_and_outbox_atomically(
     )
 
     with pytest.raises(RuntimeError, match="injected command-result failure"):
-        await authority.handle_command_envelope(envelope)
+        await authority.handle_command_envelope(
+            envelope,
+            published_at=NOW + timedelta(seconds=1),
+        )
 
     state = await repository.get_lifecycle_state(lifecycle_id)
     assert state is not None
@@ -247,7 +265,13 @@ async def test_expected_version_lock_serializes_racing_mutations(
     ]
 
     results = await asyncio.gather(
-        *(authority.handle_command_envelope(command) for command in commands)
+        *(
+            authority.handle_command_envelope(
+                command,
+                published_at=NOW + timedelta(seconds=1),
+            )
+            for command in commands
+        )
     )
 
     assert sorted(item.result.verdict.value for item in results) == ["applied", "stale"]
@@ -369,7 +393,8 @@ async def test_older_claimed_reconcile_cannot_overwrite_newer_command(
             capability_id=capability_id,
             target="waiting",
             requested_at=NOW + timedelta(seconds=10),
-        )
+        ),
+        published_at=NOW + timedelta(seconds=10),
     )
     stale_changed = await authority.reconcile_claimed(
         lifecycle_id=lifecycle_id,
@@ -453,7 +478,7 @@ async def test_bootstrap_is_idempotent_but_rejects_binding_or_spec_conflicts(
 
 
 @pytest.mark.asyncio
-async def test_command_requested_before_current_authority_time_is_stale_without_mutation(
+async def test_command_published_before_current_authority_time_is_stale_without_mutation(
     integration_resources,
 ) -> None:
     suffix = uuid.uuid4().hex[:8]
@@ -469,8 +494,9 @@ async def test_command_requested_before_current_authority_time_is_stale_without_
             actor_id=actor_id,
             capability_id=capability_id,
             target="waiting",
-            requested_at=NOW + timedelta(seconds=10),
-        )
+            requested_at=NOW + timedelta(seconds=1),
+        ),
+        published_at=NOW + timedelta(seconds=10, microseconds=987654),
     )
     before = await _counts(integration_resources.pool, lifecycle_id)
 
@@ -483,13 +509,14 @@ async def test_command_requested_before_current_authority_time_is_stale_without_
             actor_id=actor_id,
             capability_id=capability_id,
             target="active",
-            requested_at=NOW + timedelta(seconds=5),
-        )
+            requested_at=NOW + timedelta(seconds=20),
+        ),
+        published_at=NOW + timedelta(seconds=5, microseconds=123456),
     )
 
     assert applied.result.verdict == CommandVerdict.APPLIED
     assert stale.result.verdict == CommandVerdict.STALE
-    assert stale.result.reason_code == "REQUESTED_AT_BEFORE_CURRENT_STATE"
+    assert stale.result.reason_code == "PUBLICATION_TIME_BEFORE_CURRENT_STATE"
     assert stale.result.mutated is False
     state = await repository.get_lifecycle_state(lifecycle_id)
     assert state is not None
@@ -499,6 +526,82 @@ async def test_command_requested_before_current_authority_time_is_stale_without_
     assert after["history"] == before["history"]
     assert after["commands"] == before["commands"] + 1
     assert after["outbox"] == before["outbox"] + 1
+
+
+@pytest.mark.asyncio
+async def test_future_requested_at_cannot_advance_or_poison_authority_chronology(
+    integration_resources,
+) -> None:
+    suffix = uuid.uuid4().hex[:8]
+    repository, lifecycle_id, repo_name, actor_id, capability_id = await _bootstrap(
+        integration_resources, suffix
+    )
+    authority = LifecycleAuthority(repository, authority_instance="integration-trusted-time")
+    future_requested_at = NOW + timedelta(days=365)
+    first_publication = NOW + timedelta(seconds=1, microseconds=987654)
+    second_publication = NOW + timedelta(seconds=2, microseconds=654321)
+    first_decision = first_publication.replace(microsecond=987000)
+    second_decision = second_publication.replace(microsecond=654000)
+
+    first = await authority.handle_command_envelope(
+        command_envelope(
+            suffix=f"{suffix}-future-request",
+            lifecycle_id=lifecycle_id,
+            repo=repo_name,
+            actor_id=actor_id,
+            capability_id=capability_id,
+            intent_name="set_mode",
+            target="manual",
+            requested_at=future_requested_at,
+        ),
+        published_at=first_publication,
+    )
+    after_first = await repository.get_lifecycle_state(lifecycle_id)
+
+    second = await authority.handle_command_envelope(
+        command_envelope(
+            suffix=f"{suffix}-real-time-request",
+            lifecycle_id=lifecycle_id,
+            repo=repo_name,
+            expected_state_version=2,
+            actor_id=actor_id,
+            capability_id=capability_id,
+            intent_name="set_mode",
+            target="autonomous",
+            requested_at=NOW + timedelta(seconds=2),
+        ),
+        published_at=second_publication,
+    )
+    after_second = await repository.get_lifecycle_state(lifecycle_id)
+
+    assert first.command.requested_at == future_requested_at
+    assert first.result.verdict == CommandVerdict.APPLIED
+    assert after_first is not None
+    assert after_first.last_reconciled_at == first_decision
+    assert after_first.last_reconciled_at < future_requested_at
+    assert second.result.verdict == CommandVerdict.APPLIED
+    assert second.result.observed_state_version == 2
+    assert second.result.resulting_state_version == 3
+    assert after_second is not None
+    assert after_second.mode.value == "autonomous"
+    assert after_second.last_reconciled_at == second_decision
+
+    command_times = await integration_resources.pool.fetch(
+        """
+        SELECT created_at FROM lifecycle_command_results
+        WHERE lifecycle_id = $1 ORDER BY id
+        """,
+        lifecycle_id,
+    )
+    outbox_times = await integration_resources.pool.fetch(
+        """
+        SELECT DISTINCT created_at FROM lifecycle_event_outbox
+        WHERE lifecycle_id = $1 ORDER BY created_at
+        """,
+        lifecycle_id,
+    )
+    assert [row["created_at"] for row in command_times] == [first_decision, second_decision]
+    assert [row["created_at"] for row in outbox_times] == [first_decision, second_decision]
 
 
 @pytest.mark.asyncio
@@ -541,7 +644,8 @@ async def test_causal_command_uses_snapshot_precision_after_broker_publication(
             capability_id=capability_id,
             target="waiting",
             requested_at=observed.last_reconciled_at,
-        )
+        ),
+        published_at=NOW + timedelta(seconds=10, microseconds=999),
     )
     assert applied.result.verdict == CommandVerdict.APPLIED
     assert applied.result.observed_state_version == observed.state_version
@@ -580,8 +684,14 @@ async def test_global_command_identity_race_is_serialized_across_lifecycles(
     )
 
     results = await asyncio.gather(
-        first_authority.handle_command_envelope(first_command),
-        second_authority.handle_command_envelope(second_command),
+        first_authority.handle_command_envelope(
+            first_command,
+            published_at=NOW + timedelta(seconds=1),
+        ),
+        second_authority.handle_command_envelope(
+            second_command,
+            published_at=NOW + timedelta(seconds=1),
+        ),
     )
 
     assert sorted(item.result.verdict.value for item in results) == ["applied", "malformed"]
@@ -637,7 +747,8 @@ async def test_outbox_claiming_preserves_per_lifecycle_sequence_during_backoff(
                 capability_id=capability_id,
                 target="waiting",
                 requested_at=NOW + timedelta(seconds=1),
-            )
+            ),
+            published_at=NOW + timedelta(seconds=1),
         )
 
         first = await repository.claim_outbox("order-worker-a", batch_size=10)
@@ -702,7 +813,8 @@ async def test_pending_obligation_rejects_command_until_canonical_evidence_unloc
             capability_id=capability_id,
             target="waiting",
             requested_at=NOW + timedelta(seconds=2),
-        )
+        ),
+        published_at=NOW + timedelta(seconds=2),
     )
     assert waiting.result.verdict == CommandVerdict.APPLIED
 
@@ -728,7 +840,8 @@ async def test_pending_obligation_rejects_command_until_canonical_evidence_unloc
             capability_id=capability_id,
             target="active",
             requested_at=NOW + timedelta(seconds=3),
-        )
+        ),
+        published_at=NOW + timedelta(seconds=3),
     )
     assert rejected.result.verdict == CommandVerdict.ILLEGAL
     assert rejected.result.reason_code == "PENDING_OBLIGATIONS"
@@ -827,7 +940,8 @@ async def test_obligation_occurrence_rejects_history_and_survives_restart_cycle(
             capability_id=capability_id,
             target="waiting",
             requested_at=NOW + timedelta(seconds=1),
-        )
+        ),
+        published_at=NOW + timedelta(seconds=1),
     )
     assert waiting_result.result.verdict == CommandVerdict.APPLIED
     waiting = await repository.get_lifecycle_state(lifecycle_id)
@@ -941,7 +1055,8 @@ async def test_obligation_occurrence_rejects_history_and_survives_restart_cycle(
             capability_id=capability_id,
             target="waiting",
             requested_at=NOW + timedelta(seconds=4),
-        )
+        ),
+        published_at=NOW + timedelta(seconds=4),
     )
     assert repeated_result.result.verdict == CommandVerdict.APPLIED
     repeated = await repository.get_lifecycle_state(lifecycle_id)
@@ -1026,7 +1141,8 @@ async def test_obligation_occurrence_migration_uses_persisted_activation_history
             capability_id=capability_id,
             target="waiting",
             requested_at=NOW + timedelta(seconds=1),
-        )
+        ),
+        published_at=NOW + timedelta(seconds=1),
     )
     before = await repository.get_lifecycle_state(lifecycle_id)
     assert before is not None
@@ -1042,7 +1158,8 @@ async def test_obligation_occurrence_migration_uses_persisted_activation_history
             intent_name="set_mode",
             target="autonomous",
             requested_at=NOW + timedelta(seconds=3),
-        )
+        ),
+        published_at=NOW + timedelta(seconds=3),
     )
     assert mode_result.result.verdict == CommandVerdict.APPLIED
     same_status = await repository.get_lifecycle_state(lifecycle_id)
@@ -1114,7 +1231,8 @@ async def test_obligation_occurrence_migration_uses_persisted_activation_history
             capability_id=capability_id,
             target="waiting",
             requested_at=NOW + timedelta(seconds=4),
-        )
+        ),
+        published_at=NOW + timedelta(seconds=4),
     )
     assert repeated_result.result.verdict == CommandVerdict.APPLIED
     repeated = await repository.get_lifecycle_state(lifecycle_id)
@@ -1183,7 +1301,8 @@ async def test_migrations_repeat_and_authority_ledgers_are_append_only(
             intent_name="set_mode",
             target="manual",
             requested_at=NOW + timedelta(seconds=1),
-        )
+        ),
+        published_at=NOW + timedelta(seconds=1),
     )
 
     statements = (

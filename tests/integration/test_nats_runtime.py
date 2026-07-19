@@ -196,6 +196,10 @@ async def test_real_canonical_observation_command_reply_and_outbox_flow(
             headers={"Nats-Msg-Id": command["id"]},
         )
         command_messages = await transport.command_subscription.fetch(batch=1, timeout=2)
+        trusted_command_publication = command_messages[0].metadata.timestamp
+        canonical_command_publication = trusted_command_publication.replace(
+            microsecond=(trusted_command_publication.microsecond // 1000) * 1000
+        )
         await runtime.handle_command_message(command_messages[0])
 
         assert await runtime.publish_outbox_once(batch_size=20) == 4
@@ -204,6 +208,8 @@ async def test_real_canonical_observation_command_reply_and_outbox_flow(
         assert state is not None
         assert state.status.value == "waiting"
         assert state.state_version == 2
+        assert state.last_reconciled_at == canonical_command_publication
+        assert state.last_reconciled_at.microsecond % 1000 == 0
         assert state.obligations[0].status.value == "pending"
         waiting_frontier = next(
             item for item in state.legal_frontier if item.id == "transition:waiting:active"
@@ -213,7 +219,7 @@ async def test_real_canonical_observation_command_reply_and_outbox_flow(
 
         evidence = obligation_evidence_envelope(
             suffix=f"{suffix}-completion",
-            completed_at=NOW + timedelta(seconds=4),
+            completed_at=state.obligations[0].activated_at,
             lifecycle_id=lifecycle_id,
             repo=repo_name,
             obligation_instance_id=state.obligations[0].obligation_instance_id,
@@ -330,9 +336,7 @@ async def test_nats_obligation_occurrence_rejects_old_evidence_then_unlocks(
             lifecycle_id,
         )
         trusted_publication = prepublished_message.metadata.timestamp
-        activation = trusted_publication + timedelta(seconds=0.5)
-        activation = activation.replace(microsecond=(activation.microsecond // 1000) * 1000)
-        assert trusted_publication < activation < claimed_completion
+        planned_activation = trusted_publication + timedelta(seconds=0.5)
         await runtime.handle_evidence_message(prepublished_message)
 
         # Reproduce the production race: the worker drains future-claimed
@@ -355,6 +359,9 @@ async def test_nats_obligation_occurrence_rejects_old_evidence_then_unlocks(
         assert after_ingress is not None
         assert after_ingress.last_reconciled_at < claimed_completion
 
+        delay = (planned_activation - datetime.now(timezone.utc)).total_seconds()
+        if delay > 0:
+            await asyncio.sleep(delay)
         command = command_envelope(
             suffix=f"{suffix}-waiting",
             lifecycle_id=lifecycle_id,
@@ -362,7 +369,7 @@ async def test_nats_obligation_occurrence_rejects_old_evidence_then_unlocks(
             actor_id=actor_id,
             capability_id=capability_id,
             target="waiting",
-            requested_at=activation,
+            requested_at=claimed_completion,
         )
         await integration_resources.js.publish(
             command["subject"],
@@ -370,9 +377,15 @@ async def test_nats_obligation_occurrence_rejects_old_evidence_then_unlocks(
             headers={"Nats-Msg-Id": command["id"]},
         )
         message = await _fetch_for_lifecycle(transport.command_subscription, lifecycle_id)
+        command_publication = message.metadata.timestamp
+        activation = command_publication.replace(
+            microsecond=(command_publication.microsecond // 1000) * 1000
+        )
+        assert trusted_publication < activation < claimed_completion
         await runtime.handle_command_message(message)
         waiting = await repository.get_lifecycle_state(lifecycle_id)
         assert waiting is not None
+        assert waiting.last_reconciled_at == activation
         assert waiting.obligations[0].obligation_instance_id == occurrence_id
         assert waiting.obligations[0].activated_at == activation
         assert waiting.obligations[0].status.value == "pending"
@@ -406,10 +419,6 @@ async def test_nats_obligation_occurrence_rejects_old_evidence_then_unlocks(
             uuid.UUID(prepublished["id"]),
         )
         assert persisted_publication == trusted_publication
-
-        delay = (activation - datetime.now(timezone.utc)).total_seconds()
-        if delay > 0:
-            await asyncio.sleep(delay + 0.05)
 
         evidence_cases = (
             obligation_evidence_envelope(
@@ -513,7 +522,10 @@ async def test_publisher_outage_commit_retry_and_restart_catchup(
             if not transport.connected:
                 break
             await asyncio.sleep(0.1)
-        applied = await authority.handle_command_envelope(command)
+        applied = await authority.handle_command_envelope(
+            command,
+            published_at=NOW + timedelta(seconds=10),
+        )
         assert applied.result.verdict == CommandVerdict.APPLIED
         assert await runtime.publish_outbox_once(batch_size=20) == 0
 
@@ -596,7 +608,10 @@ async def test_publisher_outage_commit_retry_and_restart_catchup(
         assert [row["event_sequence"] for row in drained_rows] == pending_sequences
         assert all(row["published_at"] is not None for row in drained_rows)
 
-        retry = await authority.handle_command_envelope(command)
+        retry = await authority.handle_command_envelope(
+            command,
+            published_at=NOW + timedelta(seconds=10),
+        )
         assert retry.result.verdict == CommandVerdict.IDEMPOTENT
         assert await restarted_runtime.publish_outbox_once(batch_size=20) == 1
         assert await restarted_runtime.publish_outbox_once(batch_size=20) == 0
